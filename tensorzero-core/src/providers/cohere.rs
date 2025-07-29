@@ -73,7 +73,7 @@ pub const PROVIDER_TYPE: &str = "cohere";
 #[cfg_attr(test, derive(ts_rs::TS))]
 #[cfg_attr(test, ts(export))]
 
-pub struct CohereProvier {
+pub struct CohereProvider {
     model_config: String,
     #[serde(skip)]
     credentials: CohereCredentials,
@@ -81,7 +81,7 @@ pub struct CohereProvier {
 
 static DEFAULT_CREDENTIALS: OnceLock<CohereCredentials> = OnceLock::new();
 
-impl CohereProvier {
+impl CohereProvider {
     pub fn new(
         model_config: String,
         api_key_location: Option<CohereCredentials>
@@ -92,14 +92,14 @@ impl CohereProvier {
             PROVIDER_TYPE,
             &DEFAULT_CREDENTIALS,
         )?;
-        Ok(CohereProvier {
-            model_name,
+        Ok(CohereProvider {
+            model_config,
             credentials,
         })
     }
 
-    pub fn model_name(&self) -> &str {
-        &self.model_name
+    pub fn model_config(&self) -> &str {
+        &self.model_config
     }
 }
 
@@ -149,40 +149,38 @@ impl CohereCredentials {
     }
 }
 
-impl InferenceProvider for SGLangProvider {
+impl InferenceProvider for CohereProvider {
     async fn infer<'a>(
         &'a self,
         ModelProviderRequest {
             request,
             provider_name: _,
-            model_name,
+            model_config,
         }: ModelProviderRequest<'a>,
         http_client: &'a reqwest::Client,
         dynamic_api_keys: &'a InferenceCredentials,
         model_provider: &'a ModelProvider,
     ) -> Result<ProviderInferenceResponse, Error> {
-        let request_body = serde_json::to_value(SGLangRequest::new(&self.model_name, request)?)
+        let request_body = serde_json::to_value(CohereRequest::new(&self.model_config, request)?)
             .map_err(|e| {
                 Error::new(ErrorDetails::Serialization {
                     message: format!(
-                        "Error serializing SGLang request: {}",
+                        "Error serializing Cohere request: {}",
                         DisplayOrDebugGateway::new(e)
                     ),
                 })
             })?;
         let request_url = get_chat_url(&self.api_base)?;
         let api_key = self.credentials.get_api_key(dynamic_api_keys)?;
-        let start_time = Instant::now();
-        let mut request_builder = http_client.post(request_url);
-        if let Some(api_key) = api_key {
-            request_builder = request_builder.bearer_auth(api_key.expose_secret());
-        }
+        let request_builder = http_client
+            .post(request_url)
+            .bearer_auth(api_key.expose_secret());
         let (res, raw_request) = inject_extra_request_data_and_send(
             PROVIDER_TYPE,
             &request.extra_body,
             &request.extra_headers,
             model_provider,
-            model_name,
+            model_config,
             request_body,
             request_builder,
         )
@@ -215,7 +213,7 @@ impl InferenceProvider for SGLangProvider {
             let latency = Latency::NonStreaming {
                 response_time: start_time.elapsed(),
             };
-            Ok(SGLangResponseWithMetadata {
+            Ok(CohereResponseWithMetadata {
                 response,
                 latency,
                 raw_response,
@@ -242,4 +240,46 @@ impl InferenceProvider for SGLangProvider {
             ))
         }
     }
+
+    async fn infer_stream<'a>(
+            &'a self,
+            ModelProviderRequest {
+                request,
+                provider_name: _,
+                model_config,
+            }: ModelProviderRequest<'a>,
+            http_client: &'a reqwest::Client,
+            dynamic_api_keys: &'a InferenceCredentials,
+            model_provider: &'a ModelProvider,
+        ) -> Result<(PeekableProviderInferenceResponseStream, String), Error> {
+            let request_body = serde_json::to_value(CohereRequest::new(&self.model_config, request)?)
+                .map_err(|e| {
+                    Error::new(ErrorDetails::Serialization {
+                        message: format!(
+                            "Error serializing Cohere request: {}",
+                            DisplayOrDebugGateway::new(e)
+                        ),
+                    })
+                })?;
+            let request_url = get_chat_url(&COHERE_API_BASE)?;
+            let api_key = self.credentials.get_api_key(dynamic_api_keys)?;
+            let start_time = Instant::now();
+            let builder = http_client
+                .post(request_url)
+                .bearer_auth(api_key.expose_secret());
+
+            let (event_source, raw_request) = inject_extra_request_data_and_send_eventsource(
+                PROVIDER_TYPE,
+                &request.extra_body,
+                &request.extra_headers,
+                model_provider,
+                model_config,
+                request_body,
+                builder,
+            )
+            .await?;
+            let stream = stream_cohere(event_source, start_time).peekable();
+            Ok((stream, raw_request))
+        }
+
 }
