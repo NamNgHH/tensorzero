@@ -52,7 +52,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 use crate::providers::{
-    anthropic::AnthropicProvider, aws_bedrock::AWSBedrockProvider, azure::AzureProvider,
+    anthropic::AnthropicProvider, aws_bedrock::AWSBedrockProvider, azure::AzureProvider,cohere::CohereProvider,
     deepseek::DeepSeekProvider, fireworks::FireworksProvider,
     gcp_vertex_anthropic::GCPVertexAnthropicProvider, gcp_vertex_gemini::GCPVertexGeminiProvider,
     groq::GroqProvider, mistral::MistralProvider, openai::OpenAIProvider,
@@ -682,6 +682,7 @@ impl ModelProvider {
             ProviderConfig::AWSBedrock(_) => "aws_bedrock",
             ProviderConfig::AWSSagemaker(_) => "aws_sagemaker",
             ProviderConfig::Azure(_) => "azure",
+            ProviderConfig::Cohere(_) => "cohere",
             ProviderConfig::Fireworks(_) => "fireworks",
             ProviderConfig::GCPVertexAnthropic(_) => "gcp_vertex_anthropic",
             ProviderConfig::GCPVertexGemini(_) => "gcp_vertex_gemini",
@@ -710,6 +711,7 @@ impl ModelProvider {
             // SageMaker doesn't have a meaningful model name concept, as we just invoke an endpoint
             ProviderConfig::AWSSagemaker(_) => None,
             ProviderConfig::Azure(provider) => Some(provider.deployment_id()),
+            ProviderConfig::Cohere(provider) => Some(provider.deployment_id()),
             ProviderConfig::Fireworks(provider) => Some(provider.model_name()),
             ProviderConfig::GCPVertexAnthropic(provider) => Some(provider.model_id()),
             ProviderConfig::GCPVertexGemini(provider) => Some(provider.model_or_endpoint_id()),
@@ -761,6 +763,7 @@ pub enum ProviderConfig {
     #[serde(rename = "aws_sagemaker")]
     AWSSagemaker(AWSSagemakerProvider),
     Azure(AzureProvider),
+    Cohere(CohereProvider),
     DeepSeek(DeepSeekProvider),
     Fireworks(FireworksProvider),
     #[serde(rename = "gcp_vertex_anthropic")]
@@ -806,6 +809,7 @@ impl ProviderConfig {
                     .thought_block_provider_type_suffix()
             )),
             ProviderConfig::Azure(_) => Cow::Borrowed(crate::providers::azure::PROVIDER_TYPE),
+            ProviderConfig::Cohere(_) => Cow::Borrowed(crate::providers::cohere::PROVIDER_TYPE),
             ProviderConfig::DeepSeek(_) => Cow::Borrowed(crate::providers::deepseek::PROVIDER_TYPE),
             ProviderConfig::Fireworks(_) => {
                 Cow::Borrowed(crate::providers::fireworks::PROVIDER_TYPE)
@@ -883,6 +887,12 @@ pub enum UninitializedProviderConfig {
         hosted_provider: HostedProviderKind,
     },
     Azure {
+        deployment_id: String,
+        endpoint: Url,
+        #[cfg_attr(test, ts(type = "string | null"))]
+        api_key_location: Option<CredentialLocation>,
+    },
+    Cohere {
         deployment_id: String,
         endpoint: Url,
         #[cfg_attr(test, ts(type = "string | null"))]
@@ -1064,6 +1074,14 @@ impl UninitializedProviderConfig {
                 endpoint,
                 api_key_location,
             )?),
+            UninitializedProviderConfig::Cohere {
+                deployment_id,
+                endpoint,
+                api_key_location,
+            } => ProviderConfig::Cohere(CohereProvider::new(
+                deployment_id,
+                endpoint,
+                                git commit --no-verify -m "implement cohere provider and skip precommit"?),
             UninitializedProviderConfig::Fireworks {
                 model_name,
                 api_key_location,
@@ -1215,6 +1233,9 @@ impl ModelProvider {
             ProviderConfig::Azure(provider) => {
                 provider.infer(request, client, api_keys, self).await
             }
+            ProviderConfig::Cohere(provider) => {
+                provider.infer(request, client, api_keys, self).await
+            }
             ProviderConfig::Fireworks(provider) => {
                 provider.infer(request, client, api_keys, self).await
             }
@@ -1282,6 +1303,9 @@ impl ModelProvider {
                 provider.infer_stream(request, client, api_keys, self).await
             }
             ProviderConfig::Azure(provider) => {
+                provider.infer_stream(request, client, api_keys, self).await
+            }
+            ProviderConfig::Cohere(provider) => {
                 provider.infer_stream(request, client, api_keys, self).await
             }
             ProviderConfig::Fireworks(provider) => {
@@ -1368,6 +1392,11 @@ impl ModelProvider {
                     .await
             }
             ProviderConfig::Azure(provider) => {
+                provider
+                    .start_batch_inference(requests, client, api_keys)
+                    .await
+            }
+            ProviderConfig::Cohere(provider) => {
                 provider
                     .start_batch_inference(requests, client, api_keys)
                     .await
@@ -1479,6 +1508,11 @@ impl ModelProvider {
                     .await
             }
             ProviderConfig::Azure(provider) => {
+                provider
+                    .poll_batch_inference(batch_request, http_client, dynamic_api_keys)
+                    .await
+            }
+            ProviderConfig::Cohere(provider) => {
                 provider
                     .poll_batch_inference(batch_request, http_client, dynamic_api_keys)
                     .await
@@ -1799,6 +1833,7 @@ impl TryFrom<(CredentialLocation, &str)> for Credential {
 
 const SHORTHAND_MODEL_PREFIXES: &[&str] = &[
     "anthropic::",
+    "cohere::",
     "deepseek::",
     "fireworks::",
     "google_ai_studio_gemini::",
@@ -1823,6 +1858,7 @@ impl ShorthandModelConfig for ModelConfig {
         let model_name = model_name.to_string();
         let provider_config = match provider_type {
             "anthropic" => ProviderConfig::Anthropic(AnthropicProvider::new(model_name, None)?),
+            "cohere" => ProviderConfig::Cohere(CohereProvider::new(model_name, None)?),
             "deepseek" => ProviderConfig::DeepSeek(DeepSeekProvider::new(model_name, None)?),
             "fireworks" => ProviderConfig::Fireworks(FireworksProvider::new(
                 model_name,

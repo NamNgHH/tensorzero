@@ -1,0 +1,13 @@
+[models.command-a-03-2025]
+routing = ["cohere"]
+
+[models.command-a-03-2025.providers.cohere]
+type = "cohere"
+model_name = "command-a-03-2025"
+
+[functions.my_function_name]
+type = "chat"
+
+[functions.my_function_name.variants.my_variant_name]
+type = "chat_completion"
+model = "command-a-03-2025"

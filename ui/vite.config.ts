@@ -15,7 +15,7 @@ export default defineConfig(({ mode }) => ({
   plugins: [
     devtoolsJson(),
     wasm(),
-    tailwindcss(),
+    tailwindcss(), 
     shouldLoadReactRouter ? reactRouter() : react(),
     tsconfigPaths(),
   ],

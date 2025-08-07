@@ -1,0 +1,10 @@
+
+services:
+  gateway:
+    image: tensorzero/gateway
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      - COHERE_API_KEY=${COHERE_API_KEY:?Environment variable COHERE_API_KEY must be set.}
+    ports:
+      - "3000:3000"
