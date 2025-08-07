@@ -25,7 +25,6 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use url::Url;
 
-use crate::inference::types::RequestMessage;
 use crate::{
     cache::ModelProviderRequest,
     endpoints::inference::InferenceCredentials,
@@ -178,7 +177,6 @@ impl InferenceProvider for CohereProvider {
         let builder = http_client
             .post(request_url)
             .bearer_auth(api_key.expose_secret());
-
         let (res, raw_request) = inject_extra_request_data_and_send(
             PROVIDER_TYPE,
             &request.extra_body,
@@ -376,48 +374,27 @@ pub fn stream_cohere(
     })
 }
 
-fn tensorzero_to_cohere_messages<'a>(
-    request_messages: &'a [RequestMessage],
-) -> Result<Vec<CohereRequestMessage<'a>>, Error> {
-    let mut out = Vec::with_capacity(request_messages.len());
-    for msg in request_messages {
-        let role = match msg.role.as_str() {
-            "user" => "USER",
-            "assistant" => "CHATBOT",
-            "system" => "SYSTEM", // optional, just in case
-            _ => {
-                return Err(ErrorDetails::InvalidInput {
-                    message: format!("Unknown message role: {}", msg.role),
-                }
-                .into())
-            }
-        };
-        out.push(CohereRequestMessage {
-            role,
-            content: msg.content,
-        });
-    }
-    Ok(out)
-}
-
 pub(super) fn prepare_cohere_messages<'a>(
     request: &'a ModelInferenceRequest<'_>,
-) -> Result<Vec<CohereRequestMessage<'a>>, Error> {
-    let mut messages = tensorzero_to_cohere_messages(&request.messages)?;
-
+) -> Result<Vec<OpenAIRequestMessage<'a>>, Error> {
+    let mut messages = Vec::with_capacity(request.messages.len());
+    for message in request.messages.iter() {
+        messages.extend(tensorzero_to_openai_messages(message, PROVIDER_TYPE)?);
+    }
     if let Some(system_msg) = tensorzero_to_cohere_system_message(request.system.as_deref()) {
         messages.insert(0, system_msg);
     }
-
     Ok(messages)
 }
 
-fn tensorzero_to_cohere_system_message(system: Option<&str>) -> Option<CohereRequestMessage<'_>> {
-    system.map(|instructions| CohereRequestMessage {
-        role: "SYSTEM",
-        content: instructions,
+fn tensorzero_to_cohere_system_message(system: Option<&str>) -> Option<OpenAIRequestMessage<'_>> {
+    system.map(|instructions| {
+        OpenAIRequestMessage::System(OpenAISystemRequestMessage {
+            content: Cow::Borrowed(instructions),
+        })
     })
 }
+
 
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -497,7 +474,7 @@ fn prepare_cohere_tools<'a>(
 
 #[derive(Debug, Serialize)]
 struct CohereRequest<'a> {
-    messages: Vec<CohereRequestMessage<'a>>,
+    messages: Vec<OpenAIRequestMessage<'a>>,
     model: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     preamble: Option<&'a str>,
@@ -518,12 +495,6 @@ struct CohereRequest<'a> {
     tool_choice: Option<CohereToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_sequences: Option<Cow<'a, [String]>>,
-}
-
-#[derive(Debug, Serialize)]
-struct CohereRequestMessage<'a> {
-    role: &'a str,
-    content: &'a str,
 }
 
 impl<'a> CohereRequest<'a> {
@@ -603,7 +574,6 @@ struct CohereResponseMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<CohereResponseToolCall>>,
 }
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 enum CohereFinishReason {
     Stop,
@@ -722,14 +692,14 @@ struct CohereDelta {
     tool_calls: Option<Vec<CohereToolCallChunk>>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct CohereChatChunkChoice {
     delta: CohereDelta,
     #[serde(skip_serializing_if = "Option::is_none")]
     finish_reason: Option<CohereFinishReason>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 struct CohereChatChunk {
     choices: Vec<CohereChatChunkChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
