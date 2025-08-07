@@ -711,7 +711,7 @@ impl ModelProvider {
             // SageMaker doesn't have a meaningful model name concept, as we just invoke an endpoint
             ProviderConfig::AWSSagemaker(_) => None,
             ProviderConfig::Azure(provider) => Some(provider.deployment_id()),
-            ProviderConfig::Cohere(provider) => Some(provider.deployment_id()),
+            ProviderConfig::Cohere(provider) => Some(provider.model_name()),
             ProviderConfig::Fireworks(provider) => Some(provider.model_name()),
             ProviderConfig::GCPVertexAnthropic(provider) => Some(provider.model_id()),
             ProviderConfig::GCPVertexGemini(provider) => Some(provider.model_or_endpoint_id()),
@@ -893,8 +893,7 @@ pub enum UninitializedProviderConfig {
         api_key_location: Option<CredentialLocation>,
     },
     Cohere {
-        deployment_id: String,
-        endpoint: Url,
+        model_name: String,
         #[cfg_attr(test, ts(type = "string | null"))]
         api_key_location: Option<CredentialLocation>,
     },
@@ -1075,13 +1074,12 @@ impl UninitializedProviderConfig {
                 api_key_location,
             )?),
             UninitializedProviderConfig::Cohere {
-                deployment_id,
-                endpoint,
+                model_name,
                 api_key_location,
             } => ProviderConfig::Cohere(CohereProvider::new(
-                deployment_id,
-                endpoint,
-                                git commit --no-verify -m "implement cohere provider and skip precommit"?),
+                model_name,
+                api_key_location,
+            )?),
             UninitializedProviderConfig::Fireworks {
                 model_name,
                 api_key_location,
