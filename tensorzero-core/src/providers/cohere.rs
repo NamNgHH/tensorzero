@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use url::Url;
 
+use crate::inference::types::RequestMessage;
 use crate::{
     cache::ModelProviderRequest,
     endpoints::inference::InferenceCredentials,
@@ -84,9 +85,9 @@ static DEFAULT_CREDENTIALS: OnceLock<CohereCredentials> = OnceLock::new();
 impl CohereProvider {
     pub fn new(
         model_name: String,
-        api_key_location: Option<CohereCredentials>,
+        api_key_location: Option<CredentialLocation>,
     ) -> Result<Self, Error> {
-        let credentials: CohereCredentials = build_creds_caching_default(
+        let credentials = build_creds_caching_default(
             api_key_location,
             default_api_key_location(),
             PROVIDER_TYPE,
@@ -108,6 +109,7 @@ pub enum CohereCredentials {
     Static(SecretString),
     Dynamic(String),
     None,
+
 }
 
 impl TryFrom<Credential> for CohereCredentials {
@@ -173,10 +175,10 @@ impl InferenceProvider for CohereProvider {
         let request_url = get_chat_url(&COHERE_API_BASE)?;
         let api_key = self.credentials.get_api_key(dynamic_api_keys)?;
         let start_time = Instant::now();
-        let mut request_builder = http_client.post(request_url);
-        if let Some(api_key) = api_key {
-            request_builder = request_builder.bearer_auth(api_key.expose_secret());
-        }
+        let builder = http_client
+            .post(request_url)
+            .bearer_auth(api_key.expose_secret());
+
         let (res, raw_request) = inject_extra_request_data_and_send(
             PROVIDER_TYPE,
             &request.extra_body,
@@ -184,7 +186,7 @@ impl InferenceProvider for CohereProvider {
             model_provider,
             model_name,
             request_body,
-            request_builder,
+            builder,
         )
         .await?;
         let latency = Latency::NonStreaming {
@@ -304,6 +306,7 @@ impl InferenceProvider for CohereProvider {
         }
         .into())
     }
+
 }
 
 fn handle_cohere_error(
@@ -373,26 +376,49 @@ pub fn stream_cohere(
     })
 }
 
+fn tensorzero_to_cohere_messages<'a>(
+    request_messages: &'a [RequestMessage],
+) -> Result<Vec<CohereRequestMessage<'a>>, Error> {
+    let mut out = Vec::with_capacity(request_messages.len());
+    for msg in request_messages {
+        let role = match msg.role.as_str() {
+            "user" => "USER",
+            "assistant" => "CHATBOT",
+            "system" => "SYSTEM", // optional, just in case
+            _ => {
+                return Err(ErrorDetails::InvalidInput {
+                    message: format!("Unknown message role: {}", msg.role),
+                }
+                .into())
+            }
+        };
+        out.push(CohereRequestMessage {
+            role,
+            content: msg.content,
+        });
+    }
+    Ok(out)
+}
+
 pub(super) fn prepare_cohere_messages<'a>(
     request: &'a ModelInferenceRequest<'_>,
-) -> Result<Vec<OpenAIRequestMessage<'a>>, Error> {
-    let mut messages = Vec::with_capacity(request.messages.len());
-    for message in request.messages.iter() {
-        messages.extend(tensorzero_to_openai_messages(message, PROVIDER_TYPE)?);
-    }
+) -> Result<Vec<CohereRequestMessage<'a>>, Error> {
+    let mut messages = tensorzero_to_cohere_messages(&request.messages)?;
+
     if let Some(system_msg) = tensorzero_to_cohere_system_message(request.system.as_deref()) {
         messages.insert(0, system_msg);
     }
+
     Ok(messages)
 }
 
-fn tensorzero_to_cohere_system_message(system: Option<&str>) -> Option<OpenAIRequestMessage<'_>> {
-    system.map(|instructions| {
-        OpenAIRequestMessage::System(OpenAISystemRequestMessage {
-            content: Cow::Borrowed(instructions),
-        })
+fn tensorzero_to_cohere_system_message(system: Option<&str>) -> Option<CohereRequestMessage<'_>> {
+    system.map(|instructions| CohereRequestMessage {
+        role: "SYSTEM",
+        content: instructions,
     })
 }
+
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -470,9 +496,292 @@ fn prepare_cohere_tools<'a>(
 }
 
 #[derive(Debug, Serialize)]
-struct CohereRequest {
-    model_name: String,
-    prompt: String,
+struct CohereRequest<'a> {
+    messages: Vec<CohereRequestMessage<'a>>,
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preamble: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<u32>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<CohereResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<CohereTool<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<CohereToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_sequences: Option<Cow<'a, [String]>>,
+}
+
+#[derive(Debug, Serialize)]
+struct CohereRequestMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+impl<'a> CohereRequest<'a> {
+    pub fn new(
+        model: &'a str,
+        request: &'a ModelInferenceRequest<'_>,
+    ) -> Result<CohereRequest<'a>, Error> {
+        let response_format = match request.json_mode {
+            ModelInferenceRequestJsonMode::On | ModelInferenceRequestJsonMode::Strict => {
+                Some(CohereResponseFormat::JsonObject)
+            }
+            ModelInferenceRequestJsonMode::Off => None,
+        };
+
+        let messages = prepare_cohere_messages(request)?;
+        let (tools, tool_choice) = prepare_cohere_tools(request)?;
+
+        Ok(CohereRequest {
+            messages,
+            model,
+            preamble: request.system.as_deref(),
+            temperature: request.temperature,
+            p: request.top_p,
+            max_tokens: request.max_tokens,
+            seed: request.seed,
+            stream: request.stream,
+            response_format,
+            tools,
+            tool_choice,
+            stop_sequences: request.borrow_stop_sequences(),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
+}
+
+impl From<CohereUsage> for Usage {
+    fn from(usage: CohereUsage) -> Self {
+        Usage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Deserialize)]
+struct CohereResponseFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Deserialize)]
+struct CohereResponseToolCall {
+    id: String,
+    function: CohereResponseFunctionCall,
+}
+
+impl From<CohereResponseToolCall> for ToolCall {
+    fn from(cohere_tool_call: CohereResponseToolCall) -> Self {
+        ToolCall {
+            id: cohere_tool_call.id,
+            name: cohere_tool_call.function.name,
+            arguments: cohere_tool_call.function.arguments,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereResponseMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CohereResponseToolCall>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum CohereFinishReason {
+    Stop,
+    Length,
+    ModelLength,
+    Error,
+    ToolCalls,
+    #[serde(other)]
+    Unknown,
+}
+
+impl From<CohereFinishReason> for FinishReason {
+    fn from(reason: CohereFinishReason) -> Self {
+        match reason {
+            CohereFinishReason::Stop => FinishReason::Stop,
+            CohereFinishReason::Length => FinishReason::Length,
+            CohereFinishReason::ModelLength => FinishReason::Length,
+            CohereFinishReason::Error => FinishReason::Unknown,
+            CohereFinishReason::ToolCalls => FinishReason::ToolCall,
+            CohereFinishReason::Unknown => FinishReason::Unknown,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereResponseChoice {
+    index: u8,
+    message: CohereResponseMessage,
+    finish_reason: CohereFinishReason,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereResponse {
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CohereResponseToolCall>>,
+    finish_reason: CohereFinishReason,
+    meta: CohereResponseMeta,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereResponseMeta {
+    tokens: CohereUsage,
+}
+
+pub struct CohereResponseWithMetadata<'a> {
+    response: CohereResponse,
+    raw_response: String,
+    latency: Latency,
+    raw_request: String,
+    generic_request: &'a ModelInferenceRequest<'a>,
+}
+
+impl<'a> TryFrom<CohereResponseWithMetadata<'a>> for ProviderInferenceResponse {
+    type Error = Error;
+
+    fn try_from(value: CohereResponseWithMetadata<'a>) -> Result<Self, Self::Error> {
+        let CohereResponseWithMetadata {
+            response,
+            raw_response,
+            latency,
+            raw_request,
+            generic_request,
+        } = value;
+
+        let usage = response.meta.tokens.into();
+        let mut content: Vec<ContentBlockOutput> = Vec::new();
+
+        if let Some(text) = response.text {
+            if !text.is_empty() {
+                content.push(text.into());
+            }
+        }
+
+        if let Some(tool_calls) = response.tool_calls {
+            for tool_call in tool_calls {
+                content.push(ContentBlockOutput::ToolCall(tool_call.into()));
+            }
+        }
+
+        let system = generic_request.system.clone();
+        let input_messages = generic_request.messages.clone();
+
+        Ok(ProviderInferenceResponse::new(
+            ProviderInferenceResponseArgs {
+                output: content,
+                system,
+                input_messages,
+                raw_request,
+                raw_response,
+                usage,
+                latency,
+                finish_reason: Some(response.finish_reason.into()),
+            },
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereFunctionCallChunk {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereToolCallChunk {
+    id: String,
+    function: CohereFunctionCallChunk,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CohereToolCallChunk>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereChatChunkChoice {
+    delta: CohereDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<CohereFinishReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereChatChunk {
+    choices: Vec<CohereChatChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<CohereUsage>,
+}
+
+fn cohere_to_tensorzero_chunk(
+    raw_message: String,
+    mut chunk: CohereChatChunk,
+    latency: Duration,
+    last_tool_name: &mut Option<String>,
+) -> Result<ProviderInferenceResponseChunk, Error> {
+    if chunk.choices.len() > 1 {
+        return Err(ErrorDetails::InferenceServer {
+            message: "Response has invalid number of choices: {}. Expected 1.".to_string(),
+            provider_type: PROVIDER_TYPE.to_string(),
+            raw_request: None,
+            raw_response: Some(raw_message.clone()),
+        }
+        .into());
+    }
+    let usage = chunk.usage.map(Into::into);
+    let mut content = vec![];
+    let mut finish_reason = None;
+    if let Some(choice) = chunk.choices.pop() {
+        if let Some(choice_finish_reason) = choice.finish_reason {
+            finish_reason = Some(choice_finish_reason.into());
+        }
+        if let Some(text) = choice.delta.content {
+            if !text.is_empty() {
+                content.push(ContentBlockChunk::Text(TextChunk {
+                    text,
+                    id: "0".to_string(),
+                }));
+            }
+        }
+        if let Some(tool_calls) = choice.delta.tool_calls {
+            for tool_call in tool_calls {
+                content.push(ContentBlockChunk::ToolCall(ToolCallChunk {
+                    id: tool_call.id,
+                    raw_name: check_new_tool_call_name(tool_call.function.name, last_tool_name),
+                    raw_arguments: tool_call.function.arguments,
+                }));
+            }
+        }
+    }
+
+    Ok(ProviderInferenceResponseChunk::new(
+        content,
+        usage,
+        raw_message,
+        latency,
+        finish_reason,
+    ))
 }
