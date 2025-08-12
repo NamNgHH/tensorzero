@@ -78,20 +78,18 @@ pub struct Config {
     pub optimizers: HashMap<String, OptimizerInfo>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export))]
 pub struct NonStreamingTimeouts {
     #[serde(default)]
     /// The total time allowed for the non-streaming request to complete.
     pub total_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export))]
 pub struct StreamingTimeouts {
     #[serde(default)]
     /// The time allowed for the first token to be produced.
@@ -100,9 +98,8 @@ pub struct StreamingTimeouts {
 
 /// Configures the timeouts for both streaming and non-streaming requests.
 /// This can be attached to various other configs (e.g. variants, models, model providers)
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export))]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(deny_unknown_fields)]
 pub struct TimeoutsConfig {
     #[serde(default)]
@@ -310,6 +307,42 @@ pub struct ObservabilityConfig {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub async_writes: bool,
+    #[serde(default)]
+    pub batch_writes: BatchWritesConfig,
+    /// If `true`, then we skip checking/applying migrations if the `TensorZeroMigration` table
+    /// contains exactly the migrations that we expect to have run.
+    #[serde(default)]
+    pub skip_completed_migrations: bool,
+}
+
+fn default_flush_interval_ms() -> u64 {
+    100
+}
+
+fn default_max_rows() -> usize {
+    1000
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+#[cfg_attr(test, ts(export))]
+pub struct BatchWritesConfig {
+    pub enabled: bool,
+    #[serde(default = "default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    #[serde(default = "default_max_rows")]
+    pub max_rows: usize,
+}
+
+impl Default for BatchWritesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            flush_interval_ms: default_flush_interval_ms(),
+            max_rows: default_max_rows(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -608,6 +641,27 @@ impl Config {
     /// Validate the config
     #[instrument(skip_all)]
     async fn validate(&mut self) -> Result<(), Error> {
+        if self.gateway.observability.batch_writes.enabled
+            && self.gateway.observability.async_writes
+        {
+            return Err(ErrorDetails::Config {
+                message: "Batch writes and async writes cannot be enabled at the same time"
+                    .to_string(),
+            }
+            .into());
+        }
+        if self.gateway.observability.batch_writes.flush_interval_ms == 0 {
+            return Err(ErrorDetails::Config {
+                message: "Batch writes flush interval must be greater than 0".to_string(),
+            }
+            .into());
+        }
+        if self.gateway.observability.batch_writes.max_rows == 0 {
+            return Err(ErrorDetails::Config {
+                message: "Batch writes max rows must be greater than 0".to_string(),
+            }
+            .into());
+        }
         // Validate each function
         for (function_name, function) in &self.functions {
             if function_name.starts_with("tensorzero::") {
@@ -954,6 +1008,8 @@ struct UninitializedFunctionConfigJson {
     user_schema: Option<TomlRelativePath>,
     assistant_schema: Option<TomlRelativePath>,
     output_schema: Option<TomlRelativePath>, // schema will default to {} if not specified
+    #[serde(default)]
+    description: Option<String>,
 }
 
 impl UninitializedFunctionConfig {
@@ -1065,17 +1121,16 @@ impl UninitializedFunctionConfig {
                     assistant_schema,
                     output_schema,
                     implicit_tool_call_config,
-                    description: None,
+                    description: params.description,
                 }))
             }
         }
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export))]
 // We don't use `#[serde(deny_unknown_fields)]` here - it needs to go on 'UninitializedVariantConfig',
 // since we use `#[serde(flatten)]` on the `inner` field.
 pub struct UninitializedVariantInfo {
@@ -1085,12 +1140,11 @@ pub struct UninitializedVariantInfo {
     pub timeouts: Option<TimeoutsConfig>,
 }
 
-#[derive(Clone, Debug, TensorZeroDeserialize, Serialize)]
+#[derive(Clone, Debug, TensorZeroDeserialize, Serialize, ts_rs::TS)]
+#[ts(export)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(test, derive(ts_rs::TS))]
-#[cfg_attr(test, ts(export))]
 pub enum UninitializedVariantConfig {
     ChatCompletion(UninitializedChatCompletionConfig),
     #[serde(rename = "experimental_best_of_n_sampling")]

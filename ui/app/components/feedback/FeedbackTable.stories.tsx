@@ -15,6 +15,12 @@ const config: Config = {
     observability: {
       enabled: true,
       async_writes: false,
+      skip_completed_migrations: false,
+      batch_writes: {
+        enabled: false,
+        flush_interval_ms: 100n,
+        max_rows: 1000,
+      },
     },
     export: {
       otlp: {
