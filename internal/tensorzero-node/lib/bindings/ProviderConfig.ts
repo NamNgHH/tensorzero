@@ -3,6 +3,7 @@ import type { AWSBedrockProvider } from "./AWSBedrockProvider";
 import type { AWSSagemakerProvider } from "./AWSSagemakerProvider";
 import type { AnthropicProvider } from "./AnthropicProvider";
 import type { AzureProvider } from "./AzureProvider";
+import type { CohereProvider } from "./CohereProvider";
 import type { DeepSeekProvider } from "./DeepSeekProvider";
 import type { DummyProvider } from "./DummyProvider";
 import type { FireworksProvider } from "./FireworksProvider";
@@ -25,6 +26,7 @@ export type ProviderConfig =
   | ({ type: "aws_bedrock" } & AWSBedrockProvider)
   | ({ type: "aws_sagemaker" } & AWSSagemakerProvider)
   | ({ type: "azure" } & AzureProvider)
+  | ({ type: "cohere" } & CohereProvider)
   | ({ type: "deepseek" } & DeepSeekProvider)
   | ({ type: "fireworks" } & FireworksProvider)
   | ({ type: "gcp_vertex_anthropic" } & GCPVertexAnthropicProvider)

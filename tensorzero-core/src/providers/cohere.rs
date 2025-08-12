@@ -755,3 +755,59 @@ fn cohere_to_tensorzero_chunk(
         finish_reason,
     ))
 }
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use uuid::Uuid;
+
+    use super::*;
+
+    use crate::inference::types::{FunctionType, RequestMessage, Role};
+    use crate::providers::test_helpers::{WEATHER_TOOL, WEATHER_TOOL_CONFIG};
+
+    #[test]
+    fn test_cohere_request_new() {
+        let request_with_tools = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["What's the weather?".to_string().into()],
+            }],
+            system: None,
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            seed: Some(69),
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            stream: false,
+            json_mode: ModelInferenceRequestJsonMode::On,
+            tool_config: Some(Cow::Borrowed(&WEATHER_TOOL_CONFIG)),
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        let cohere_request =
+            CohereRequest::new("command-a-03-2025", &request_with_tools).unwrap();
+
+        assert_eq!(cohere_request.model, "command-a-03-2025");
+        assert_eq!(cohere_request.messages.len(), 1);
+        assert_eq!(cohere_request.temperature, Some(0.5));
+        assert_eq!(cohere_request.max_tokens, Some(100));
+        assert!(!cohere_request.stream);
+        assert_eq!(
+            cohere_request.response_format,
+            Some(CohereResponseFormat::JsonObject)
+        );
+        assert!(cohere_request.tools.is_some());
+        let tools = cohere_request.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, WEATHER_TOOL.name());
+        assert_eq!(tools[0].function.parameters, WEATHER_TOOL.parameters());
+        assert_eq!(cohere_request.tool_choice, Some(CohereToolChoice::Any));
+    }
+
+}

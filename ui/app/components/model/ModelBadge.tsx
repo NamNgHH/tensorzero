@@ -46,6 +46,12 @@ function formatProvider(provider: ProviderConfig["type"]): {
         className:
           "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300",
       };
+    case "cohere":
+      return {
+        name: "Cohere",
+        className:
+          "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300",
+      };
     case "deepseek":
       return {
         name: "DeepSeek",

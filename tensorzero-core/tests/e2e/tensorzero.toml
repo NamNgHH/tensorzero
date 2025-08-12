@@ -693,6 +693,34 @@ routing = ["openai"]
 type = "openai"
 model_name = "text-embedding-3-small"
 
+[models."command-a-03-2025"]
+routing = ["cohere"]
+
+[models."command-a-03-2025".providers.cohere]
+type = "cohere"
+model_name = "command-a-03-2025"
+
+[models."command-a-03-2025-dynamic"]
+routing = ["cohere"]
+
+[models."command-a-03-2025-dynamic".providers.cohere]
+type = "cohere"
+model_name = "command-a-03-2025"
+
+[models."command-r-plus"]
+routing = ["cohere"]
+
+[models."command-r-plus".providers.cohere]
+type = "cohere"
+model_name = "command-r-plus"
+
+[models."command-r-plus-dynamic"]
+routing = ["cohere"]
+
+[models."command-r-plus-dynamic".providers.cohere]
+type = "cohere"
+model_name = "command-r-plus"
+api_key_location = "dynamic::cohere_api_key"
 
 # ┌────────────────────────────────────────────────────────────────────────────┐
 # │                                 FUNCTIONS                                  │
@@ -1174,6 +1202,37 @@ model = "mistral::open-mistral-nemo-2407"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 100
 
+[functions.basic_test.variants.cohere]
+type = "chat_completion"
+model = "command-r-plus"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+
+[functions.basic_test.variants.cohere-extra-body]
+type = "chat_completion"
+model = "command-r-plus"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+extra_body = [{ pointer = "/temperature", value = 0.123 }]
+
+[functions.basic_test.variants.cohere-extra-headers]
+type = "chat_completion"
+model = "command-r-plus"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+extra_headers = [{ name = "Authorization", value = "invalid_cohere_auth" }]
+
+[functions.basic_test.variants.cohere-dynamic]
+type = "chat_completion"
+model = "command-r-plus-dynamic"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+
+[functions.basic_test.variants.cohere-shorthand]
+type = "chat_completion"
+model = "cohere::command-r-plus"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
 
 [functions.basic_test.variants.openai]
 type = "chat_completion"
@@ -1875,6 +1934,7 @@ system_template = "../../fixtures/config/functions/json_success/prompt/system_te
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 max_tokens = 100
 json_mode = "strict"
+
 [functions.json_success.variants.mistral]
 type = "chat_completion"
 model = "open-mistral-nemo-2407"
@@ -1886,6 +1946,22 @@ max_tokens = 100
 [functions.json_success.variants.mistral-strict]
 type = "chat_completion"
 model = "open-mistral-nemo-2407"
+system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+max_tokens = 100
+json_mode = "strict"
+
+[functions.json_success.variants.cohere]
+type = "chat_completion"
+model = "command-r-plus"
+system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+json_mode = "implicit_tool"
+max_tokens = 100
+
+[functions.json_success.variants.cohere-strict]
+type = "chat_completion"
+model = "command-r-plus"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 max_tokens = 100
@@ -2186,6 +2262,14 @@ max_tokens = 100
 [functions.json_success.variants.mistral_json_mode_off]
 type = "chat_completion"
 model = "open-mistral-nemo-2407"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+json_mode = "off"
+max_tokens = 100
+
+[functions.json_success.variants.cohere_json_mode_off]
+type = "chat_completion"
+model = "command-r-plus"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 json_mode = "off"
@@ -2493,7 +2577,6 @@ user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_templa
 json_mode = "implicit_tool"
 max_tokens = 500
 
-
 [functions.dynamic_json.variants.mistral]
 type = "chat_completion"
 model = "open-mistral-nemo-2407"
@@ -2505,6 +2588,22 @@ max_tokens = 100
 [functions.dynamic_json.variants.mistral-strict]
 type = "chat_completion"
 model = "open-mistral-nemo-2407"
+system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
+max_tokens = 100
+json_mode = "strict"
+
+[functions.dynamic_json.variants.cohere]
+type = "chat_completion"
+model = "command-r-plus"
+system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
+json_mode = "implicit_tool"
+max_tokens = 100
+
+[functions.dynamic_json.variants.cohere-strict]
+type = "chat_completion"
+model = "command-r-plus"
 system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
 max_tokens = 100
@@ -2902,6 +3001,12 @@ max_tokens = 500
 [functions.weather_helper.variants.mistral]
 type = "chat_completion"
 model = "open-mistral-nemo-2407"
+system_template = "../../fixtures/config/functions/weather_helper/prompt/system_template.minijinja"
+max_tokens = 100
+
+[functions.weather_helper.variants.cohere]
+type = "chat_completion"
+model = "command-r-plus"
 system_template = "../../fixtures/config/functions/weather_helper/prompt/system_template.minijinja"
 max_tokens = 100
 

@@ -38,6 +38,7 @@ export type UninitializedModelProvider = {
       endpoint: string;
       api_key_location: string | null;
     }
+  | { type: "cohere"; model_name: string; api_key_location: string | null }
   | {
       type: "gcp_vertex_anthropic";
       model_id: string;

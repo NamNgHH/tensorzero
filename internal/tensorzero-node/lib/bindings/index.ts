@@ -12,6 +12,7 @@ export * from "./ChainOfThoughtConfig";
 export * from "./ChatCompletionConfig";
 export * from "./ChatInferenceDatapoint";
 export * from "./ClickhouseFormat";
+export * from "./CohereProvider";
 export * from "./Config";
 export * from "./ContentBlock";
 export * from "./ContentBlockChatOutput";

@@ -9,6 +9,7 @@ Why?
   [AWS Bedrock](https://www.tensorzero.com/docs/gateway/guides/providers/aws-bedrock),
   [AWS SageMaker](https://www.tensorzero.com/docs/gateway/guides/providers/aws-sagemaker),
   [Azure OpenAI Service](https://www.tensorzero.com/docs/gateway/guides/providers/azure),
+  [Cohere](https://www.tensorzero.com/docs/gateway/guides/providers/cohere),
   [DeepSeek](https://www.tensorzero.com/docs/gateway/guides/providers/deepseek),
   [Fireworks](https://www.tensorzero.com/docs/gateway/guides/providers/fireworks),
   [GCP Vertex AI Anthropic](https://www.tensorzero.com/docs/gateway/guides/providers/gcp-vertex-ai-anthropic),

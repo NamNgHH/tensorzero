@@ -1679,6 +1679,13 @@ pub async fn test_bad_auth_extra_headers_with_provider_and_stream(
                 "Unexpected error: {res}"
             );
         }
+        "cohere" => {
+            assert!(
+                res["error"].as_str().unwrap().contains("Invalid API key")
+                    || res["error"].as_str().unwrap().contains("401 Unauthorized"),
+                "Unexpected error: {res}"
+            );
+        }
         "fireworks" => {
             assert!(
                 res["error"].as_str().unwrap().contains("unauthorized"),
@@ -6023,11 +6030,12 @@ pub async fn test_tool_use_tool_choice_none_streaming_inference_request_with_pro
 pub async fn test_tool_use_tool_choice_specific_inference_request_with_provider(
     provider: E2ETestProvider,
 ) {
-    // GCP Vertex AI, Groq, Mistral, and Together don't support ToolChoice::Specific.
+    // GCP Vertex AI, Groq, Cohere,Mistral, and Together don't support ToolChoice::Specific.
     // (Together AI claims to support it, but we can't get it to behave strictly.)
     // In those cases, we use ToolChoice::Any with a single tool under the hood.
     // Even then, they seem to hallucinate a new tool.
     if provider.model_provider_name.contains("gcp_vertex")
+        || provider.model_provider_name == "cohere"
         || provider.model_provider_name == "groq"
         || provider.model_provider_name == "mistral"
         || provider.model_provider_name == "together"
@@ -6358,11 +6366,12 @@ pub async fn check_tool_use_tool_choice_specific_inference_response(
 pub async fn test_tool_use_tool_choice_specific_streaming_inference_request_with_provider(
     provider: E2ETestProvider,
 ) {
-    // - GCP Vertex AI, Mistral, Together and Groq don't support ToolChoice::Specific.
+    // - GCP Vertex AI,Cohere, Mistral, Together and Groq don't support ToolChoice::Specific.
     // (Together AI claims to support it, but we can't get it to behave strictly.)
     // In those cases, we use ToolChoice::Any with a single tool under the hood.
     // Even then, they seem to hallucinate a new tool.
     if provider.model_provider_name.contains("gcp_vertex")
+        || provider.model_provider_name == "cohere"
         || provider.model_provider_name == "mistral"
         || provider.model_provider_name == "together"
         || provider.model_provider_name == "groq"
