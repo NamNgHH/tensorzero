@@ -84,9 +84,9 @@ static DEFAULT_CREDENTIALS: OnceLock<CohereCredentials> = OnceLock::new();
 impl CohereProvider {
     pub fn new(
         model_name: String,
-        api_key_location: Option<CohereCredentials>,
+        api_key_location: Option<CredentialLocation>,
     ) -> Result<Self, Error> {
-        let credentials: CohereCredentials = build_creds_caching_default(
+        let credentials = build_creds_caching_default(
             api_key_location,
             default_api_key_location(),
             PROVIDER_TYPE,
@@ -108,6 +108,7 @@ pub enum CohereCredentials {
     Static(SecretString),
     Dynamic(String),
     None,
+
 }
 
 impl TryFrom<Credential> for CohereCredentials {
@@ -173,10 +174,9 @@ impl InferenceProvider for CohereProvider {
         let request_url = get_chat_url(&COHERE_API_BASE)?;
         let api_key = self.credentials.get_api_key(dynamic_api_keys)?;
         let start_time = Instant::now();
-        let mut request_builder = http_client.post(request_url);
-        if let Some(api_key) = api_key {
-            request_builder = request_builder.bearer_auth(api_key.expose_secret());
-        }
+        let builder = http_client
+            .post(request_url)
+            .bearer_auth(api_key.expose_secret());
         let (res, raw_request) = inject_extra_request_data_and_send(
             PROVIDER_TYPE,
             &request.extra_body,
@@ -184,7 +184,7 @@ impl InferenceProvider for CohereProvider {
             model_provider,
             model_name,
             request_body,
-            request_builder,
+            builder,
         )
         .await?;
         let latency = Latency::NonStreaming {
@@ -304,6 +304,7 @@ impl InferenceProvider for CohereProvider {
         }
         .into())
     }
+
 }
 
 fn handle_cohere_error(
@@ -394,6 +395,8 @@ fn tensorzero_to_cohere_system_message(system: Option<&str>) -> Option<OpenAIReq
     })
 }
 
+
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type")]
@@ -470,9 +473,857 @@ fn prepare_cohere_tools<'a>(
 }
 
 #[derive(Debug, Serialize)]
-struct CohereRequest {
-    model_name: String,
-    prompt: String,
+struct CohereRequest<'a> {
+    messages: Vec<OpenAIRequestMessage<'a>>,
+    model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preamble: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed: Option<u32>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<CohereResponseFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<CohereTool<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<CohereToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop_sequences: Option<Cow<'a, [String]>>,
+}
+
+impl<'a> CohereRequest<'a> {
+    pub fn new(
+        model: &'a str,
+        request: &'a ModelInferenceRequest<'_>,
+    ) -> Result<CohereRequest<'a>, Error> {
+        let response_format = match request.json_mode {
+            ModelInferenceRequestJsonMode::On | ModelInferenceRequestJsonMode::Strict => {
+                Some(CohereResponseFormat::JsonObject)
+            }
+            ModelInferenceRequestJsonMode::Off => None,
+        };
+
+        let messages = prepare_cohere_messages(request)?;
+        let (tools, tool_choice) = prepare_cohere_tools(request)?;
+
+        Ok(CohereRequest {
+            messages,
+            model,
+            preamble: request.system.as_deref(),
+            temperature: request.temperature,
+            p: request.top_p,
+            max_tokens: request.max_tokens,
+            seed: request.seed,
+            stream: request.stream,
+            response_format,
+            tools,
+            tool_choice,
+            stop_sequences: request.borrow_stop_sequences(),
+        })
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereUsage {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
+}
+
+impl From<CohereUsage> for Usage {
+    fn from(usage: CohereUsage) -> Self {
+        Usage {
+            input_tokens: usage.prompt_tokens,
+            output_tokens: usage.completion_tokens,
+        }
+    }
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Deserialize)]
+struct CohereResponseFunctionCall {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Serialize, Debug, Clone, PartialEq, Deserialize)]
+struct CohereResponseToolCall {
+    id: String,
+    function: CohereResponseFunctionCall,
+}
+
+impl From<CohereResponseToolCall> for ToolCall {
+    fn from(cohere_tool_call: CohereResponseToolCall) -> Self {
+        ToolCall {
+            id: cohere_tool_call.id,
+            name: cohere_tool_call.function.name,
+            arguments: cohere_tool_call.function.arguments,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereResponseMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CohereResponseToolCall>>,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+enum CohereFinishReason {
+    Stop,
+    Length,
+    ModelLength,
+    Error,
+    ToolCalls,
+    #[serde(other)]
+    Unknown,
+}
+
+impl From<CohereFinishReason> for FinishReason {
+    fn from(reason: CohereFinishReason) -> Self {
+        match reason {
+            CohereFinishReason::Stop => FinishReason::Stop,
+            CohereFinishReason::Length => FinishReason::Length,
+            CohereFinishReason::ModelLength => FinishReason::Length,
+            CohereFinishReason::Error => FinishReason::Unknown,
+            CohereFinishReason::ToolCalls => FinishReason::ToolCall,
+            CohereFinishReason::Unknown => FinishReason::Unknown,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereResponseChoice {
+    index: u8,
+    message: CohereResponseMessage,
+    finish_reason: CohereFinishReason,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereResponse {
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CohereResponseToolCall>>,
+    finish_reason: CohereFinishReason,
+    meta: CohereResponseMeta,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CohereResponseMeta {
+    tokens: CohereUsage,
+}
+
+pub struct CohereResponseWithMetadata<'a> {
+    response: CohereResponse,
+    raw_response: String,
+    latency: Latency,
+    raw_request: String,
+    generic_request: &'a ModelInferenceRequest<'a>,
+}
+
+impl<'a> TryFrom<CohereResponseWithMetadata<'a>> for ProviderInferenceResponse {
+    type Error = Error;
+
+    fn try_from(value: CohereResponseWithMetadata<'a>) -> Result<Self, Self::Error> {
+        let CohereResponseWithMetadata {
+            response,
+            raw_response,
+            latency,
+            raw_request,
+            generic_request,
+        } = value;
+
+        let usage = response.meta.tokens.into();
+        let mut content: Vec<ContentBlockOutput> = Vec::new();
+
+        if let Some(text) = response.text {
+            if !text.is_empty() {
+                content.push(text.into());
+            }
+        }
+
+        if let Some(tool_calls) = response.tool_calls {
+            for tool_call in tool_calls {
+                content.push(ContentBlockOutput::ToolCall(tool_call.into()));
+            }
+        }
+
+        let system = generic_request.system.clone();
+        let input_messages = generic_request.messages.clone();
+
+        Ok(ProviderInferenceResponse::new(
+            ProviderInferenceResponseArgs {
+                output: content,
+                system,
+                input_messages,
+                raw_request,
+                raw_response,
+                usage,
+                latency,
+                finish_reason: Some(response.finish_reason.into()),
+            },
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereFunctionCallChunk {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereToolCallChunk {
+    id: String,
+    function: CohereFunctionCallChunk,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct CohereDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<CohereToolCallChunk>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct CohereChatChunkChoice {
+    delta: CohereDelta,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_reason: Option<CohereFinishReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+struct CohereChatChunk {
+    choices: Vec<CohereChatChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<CohereUsage>,
+}
+
+fn cohere_to_tensorzero_chunk(
+    raw_message: String,
+    mut chunk: CohereChatChunk,
+    latency: Duration,
+    last_tool_name: &mut Option<String>,
+) -> Result<ProviderInferenceResponseChunk, Error> {
+    if chunk.choices.len() > 1 {
+        return Err(ErrorDetails::InferenceServer {
+            message: "Response has invalid number of choices: {}. Expected 1.".to_string(),
+            provider_type: PROVIDER_TYPE.to_string(),
+            raw_request: None,
+            raw_response: Some(raw_message.clone()),
+        }
+        .into());
+    }
+    let usage = chunk.usage.map(Into::into);
+    let mut content = vec![];
+    let mut finish_reason = None;
+    if let Some(choice) = chunk.choices.pop() {
+        if let Some(choice_finish_reason) = choice.finish_reason {
+            finish_reason = Some(choice_finish_reason.into());
+        }
+        if let Some(text) = choice.delta.content {
+            if !text.is_empty() {
+                content.push(ContentBlockChunk::Text(TextChunk {
+                    text,
+                    id: "0".to_string(),
+                }));
+            }
+        }
+        if let Some(tool_calls) = choice.delta.tool_calls {
+            for tool_call in tool_calls {
+                content.push(ContentBlockChunk::ToolCall(ToolCallChunk {
+                    id: tool_call.id,
+                    raw_name: check_new_tool_call_name(tool_call.function.name, last_tool_name),
+                    raw_arguments: tool_call.function.arguments,
+                }));
+            }
+        }
+    }
+
+    Ok(ProviderInferenceResponseChunk::new(
+        content,
+        usage,
+        raw_message,
+        latency,
+        finish_reason,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::time::Duration;
+
+    use uuid::Uuid;
+
+    use super::*;
+
+    use crate::inference::types::{
+        FunctionType, ModelInferenceRequestJsonMode, RequestMessage, Role,
+    };
+    use crate::providers::test_helpers::{WEATHER_TOOL, WEATHER_TOOL_CONFIG};
+
+    #[test]
+    fn test_cohere_request_new() {
+        let request_with_tools = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["What's the weather?".to_string().into()],
+            }],
+            system: None,
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            seed: Some(69),
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            stream: false,
+            json_mode: ModelInferenceRequestJsonMode::On,
+            tool_config: Some(Cow::Borrowed(&WEATHER_TOOL_CONFIG)),
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        let cohere_request =
+            CohereRequest::new("command-a-03-2025", &request_with_tools).unwrap();
+
+        assert_eq!(cohere_request.model, "command-a-03-2025");
+        assert_eq!(cohere_request.messages.len(), 1);
+        assert_eq!(cohere_request.preamble, Some("You are a helpful assistant."));
+        assert_eq!(cohere_request.temperature, Some(0.5));
+        assert_eq!(cohere_request.p, Some(0.9));
+        assert_eq!(cohere_request.max_tokens, Some(100));
+        assert!(!cohere_request.stream);
+        assert_eq!(cohere_request.seed, Some(69));
+        assert_eq!(
+            cohere_request.response_format,
+            Some(CohereResponseFormat::JsonObject)
+        );
+        assert!(cohere_request.tools.is_some());
+        let tools = cohere_request.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].function.name, WEATHER_TOOL.name());
+        assert_eq!(tools[0].function.parameters, WEATHER_TOOL.parameters());
+        assert_eq!(cohere_request.tool_choice, Some(CohereToolChoice::Any));
+    }
+
+    #[test]
+    fn test_cohere_request_new_without_system() {
+        let request_no_system = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["Hello".to_string().into()],
+            }],
+            system: None,
+            temperature: Some(0.7),
+            max_tokens: Some(50),
+            stream: true,
+            json_mode: ModelInferenceRequestJsonMode::Off,
+            tool_config: None,
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        let cohere_request = CohereRequest::new("command-r", &request_no_system)
+            .expect("failed to create Cohere Request during test");
+
+        assert_eq!(cohere_request.model, "command-r");
+        assert_eq!(cohere_request.preamble, None);
+        assert_eq!(cohere_request.temperature, Some(0.7));
+        assert_eq!(cohere_request.max_tokens, Some(50));
+        assert!(cohere_request.stream);
+        assert_eq!(cohere_request.response_format, None);
+        assert!(cohere_request.tools.is_none());
+        assert!(cohere_request.tool_choice.is_none());
+    }
+
+    #[test]
+    fn test_cohere_api_base() {
+        assert_eq!(COHERE_API_BASE.as_str(), "https://api.cohere.ai/v1");
+    }
+
+    #[test]
+    fn test_credential_to_cohere_credentials() {
+        // Test Static credential
+        let generic = Credential::Static(SecretString::from("test_key"));
+        let creds = CohereCredentials::try_from(generic).unwrap();
+        assert!(matches!(creds, CohereCredentials::Static(_)));
+
+        // Test Dynamic credential
+        let generic = Credential::Dynamic("key_name".to_string());
+        let creds = CohereCredentials::try_from(generic).unwrap();
+        assert!(matches!(creds, CohereCredentials::Dynamic(_)));
+
+        // Test Missing credential
+        let generic = Credential::Missing;
+        let creds = CohereCredentials::try_from(generic).unwrap();
+        assert!(matches!(creds, CohereCredentials::None));
+
+        // Test invalid type
+        let generic = Credential::FileContents(SecretString::from("test"));
+        let result = CohereCredentials::try_from(generic);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err().get_owned_details(),
+            ErrorDetails::Config { message } if message.contains("Invalid api_key_location")
+        ));
+    }
+
+    #[test]
+    fn test_cohere_response_with_metadata_try_into() {
+        // Test case 1: Valid response with content
+        let valid_response = CohereResponse {
+            text: Some("Hello, world!".to_string()),
+            tool_calls: None,
+            finish_reason: CohereFinishReason::Stop,
+            meta: CohereResponseMeta {
+                tokens: CohereUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 20,
+                    total_tokens: 30,
+                },
+            },
+        };
+
+        let generic_request = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["test_user".to_string().into()],
+            }],
+            system: None,
+            temperature: Some(0.5),
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            max_tokens: Some(100),
+            stream: false,
+            seed: Some(69),
+            json_mode: ModelInferenceRequestJsonMode::Off,
+            tool_config: None,
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        let raw_request = "test_request".to_string();
+        let raw_response = "test_response".to_string();
+        
+        let cohere_response_with_metadata = CohereResponseWithMetadata {
+            response: valid_response,
+            raw_response: raw_response.clone(),
+            latency: Latency::NonStreaming {
+                response_time: Duration::from_millis(100),
+            },
+            raw_request: raw_request.clone(),
+            generic_request: &generic_request,
+        };
+
+        let inference_response: ProviderInferenceResponse =
+            cohere_response_with_metadata.try_into().unwrap();
+
+        assert_eq!(inference_response.output.len(), 1);
+        assert_eq!(
+            inference_response.output[0],
+            "Hello, world!".to_string().into()
+        );
+        assert_eq!(inference_response.raw_response, raw_response);
+        assert_eq!(inference_response.raw_request, raw_request);
+        assert_eq!(inference_response.usage.input_tokens, 10);
+        assert_eq!(inference_response.usage.output_tokens, 20);
+        assert_eq!(
+            inference_response.latency,
+            Latency::NonStreaming {
+                response_time: Duration::from_millis(100)
+            }
+        );
+        assert_eq!(inference_response.finish_reason, Some(FinishReason::Stop));
+        assert_eq!(inference_response.system, None);
+        assert_eq!(
+            inference_response.input_messages,
+            vec![RequestMessage {
+                role: Role::User,
+                content: vec!["test_user".to_string().into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn test_cohere_response_with_tool_calls() {
+        // Test case 2: Valid response with tool calls
+        let valid_response_with_tools = CohereResponse {
+            text: None,
+            tool_calls: Some(vec![CohereResponseToolCall {
+                id: "call1".to_string(),
+                function: CohereResponseFunctionCall {
+                    name: "test_function".to_string(),
+                    arguments: r#"{"location": "San Francisco"}"#.to_string(),
+                },
+            }]),
+            finish_reason: CohereFinishReason::ToolCalls,
+            meta: CohereResponseMeta {
+                tokens: CohereUsage {
+                    prompt_tokens: 15,
+                    completion_tokens: 25,
+                    total_tokens: 40,
+                },
+            },
+        };
+
+        let generic_request = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::Assistant,
+                content: vec!["test_assistant".to_string().into()],
+            }],
+            system: Some("test_system".to_string()),
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            seed: Some(69),
+            top_p: Some(0.9),
+            presence_penalty: None,
+            frequency_penalty: None,
+            stream: false,
+            json_mode: ModelInferenceRequestJsonMode::Off,
+            tool_config: Some(Cow::Borrowed(&WEATHER_TOOL_CONFIG)),
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        let raw_request = "test_request".to_string();
+        let raw_response = "test_response".to_string();
+
+        let cohere_response_with_metadata = CohereResponseWithMetadata {
+            response: valid_response_with_tools,
+            raw_response: raw_response.clone(),
+            latency: Latency::NonStreaming {
+                response_time: Duration::from_millis(110),
+            },
+            raw_request: raw_request.clone(),
+            generic_request: &generic_request,
+        };
+
+        let inference_response: ProviderInferenceResponse =
+            cohere_response_with_metadata.try_into().unwrap();
+
+        assert_eq!(
+            inference_response.output,
+            vec![ContentBlockOutput::ToolCall(ToolCall {
+                id: "call1".to_string(),
+                name: "test_function".to_string(),
+                arguments: r#"{"location": "San Francisco"}"#.to_string(),
+            })]
+        );
+        assert_eq!(inference_response.usage.input_tokens, 15);
+        assert_eq!(inference_response.usage.output_tokens, 25);
+        assert_eq!(
+            inference_response.latency,
+            Latency::NonStreaming {
+                response_time: Duration::from_millis(110)
+            }
+        );
+        assert_eq!(inference_response.raw_request, raw_request);
+        assert_eq!(inference_response.raw_response, raw_response);
+        assert_eq!(inference_response.finish_reason, Some(FinishReason::ToolCall));
+        assert_eq!(inference_response.system, Some("test_system".to_string()));
+        assert_eq!(
+            inference_response.input_messages,
+            vec![RequestMessage {
+                role: Role::Assistant,
+                content: vec!["test_assistant".to_string().into()],
+            }]
+        );
+    }
+
+    #[test]
+    fn test_cohere_response_with_empty_text() {
+        // Test case 3: Response with empty text (should be filtered out)
+        let response_with_empty_text = CohereResponse {
+            text: Some("".to_string()),
+            tool_calls: None,
+            finish_reason: CohereFinishReason::Stop,
+            meta: CohereResponseMeta {
+                tokens: CohereUsage {
+                    prompt_tokens: 5,
+                    completion_tokens: 0,
+                    total_tokens: 5,
+                },
+            },
+        };
+
+        let generic_request = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["test".to_string().into()],
+            }],
+            system: None,
+            temperature: None,
+            max_tokens: None,
+            seed: None,
+            top_p: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            stream: false,
+            json_mode: ModelInferenceRequestJsonMode::Off,
+            tool_config: None,
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        let cohere_response_with_metadata = CohereResponseWithMetadata {
+            response: response_with_empty_text,
+            raw_response: "test_response".to_string(),
+            latency: Latency::NonStreaming {
+                response_time: Duration::from_millis(50),
+            },
+            raw_request: "test_request".to_string(),
+            generic_request: &generic_request,
+        };
+
+        let inference_response: ProviderInferenceResponse =
+            cohere_response_with_metadata.try_into().unwrap();
+
+        // Empty text should result in empty content
+        assert_eq!(inference_response.output.len(), 0);
+        assert_eq!(inference_response.usage.input_tokens, 5);
+        assert_eq!(inference_response.usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_handle_cohere_error() {
+        use reqwest::StatusCode;
+
+        // Test bad request error
+        let bad_request = handle_cohere_error(StatusCode::BAD_REQUEST, "Bad request");
+        let details = bad_request.unwrap_err().get_owned_details();
+        assert!(matches!(details, ErrorDetails::InferenceClient { .. }));
+        if let ErrorDetails::InferenceClient {
+            message,
+            status_code,
+            provider_type,
+            raw_request,
+            raw_response,
+        } = details
+        {
+            assert_eq!(message, "Bad request");
+            assert_eq!(status_code, Some(StatusCode::BAD_REQUEST));
+            assert_eq!(provider_type, PROVIDER_TYPE.to_string());
+            assert_eq!(raw_request, None);
+            assert_eq!(raw_response, None);
+        }
+
+        // Test unauthorized error
+        let unauthorized = handle_cohere_error(StatusCode::UNAUTHORIZED, "Unauthorized access");
+        let details = unauthorized.unwrap_err().get_owned_details();
+        assert!(matches!(details, ErrorDetails::InferenceClient { .. }));
+        if let ErrorDetails::InferenceClient {
+            message,
+            status_code,
+            provider_type,
+            raw_request,
+            raw_response,
+        } = details
+        {
+            assert_eq!(message, "Unauthorized access");
+            assert_eq!(status_code, Some(StatusCode::UNAUTHORIZED));
+            assert_eq!(provider_type, PROVIDER_TYPE.to_string());
+            assert_eq!(raw_request, None);
+            assert_eq!(raw_response, None);
+        }
+
+        // Test forbidden error
+        let forbidden = handle_cohere_error(StatusCode::FORBIDDEN, "Forbidden access");
+        let details = forbidden.unwrap_err().get_owned_details();
+        assert!(matches!(details, ErrorDetails::InferenceClient { .. }));
+
+        // Test rate limit error
+        let rate_limit = handle_cohere_error(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded");
+        let details = rate_limit.unwrap_err().get_owned_details();
+        assert!(matches!(details, ErrorDetails::InferenceClient { .. }));
+
+        // Test server error
+        let server_error = handle_cohere_error(StatusCode::INTERNAL_SERVER_ERROR, "Server error");
+        let details = server_error.unwrap_err().get_owned_details();
+        assert!(matches!(details, ErrorDetails::InferenceServer { .. }));
+        if let ErrorDetails::InferenceServer {
+            message,
+            provider_type,
+            raw_request,
+            raw_response,
+        } = details
+        {
+            assert_eq!(message, "Server error");
+            assert_eq!(provider_type, PROVIDER_TYPE.to_string());
+            assert_eq!(raw_request, None);
+            assert_eq!(raw_response, None);
+        }
+    }
+
+    #[test]
+    fn test_cohere_finish_reason_conversion() {
+        assert_eq!(FinishReason::from(CohereFinishReason::Stop), FinishReason::Stop);
+        assert_eq!(FinishReason::from(CohereFinishReason::Length), FinishReason::Length);
+        assert_eq!(FinishReason::from(CohereFinishReason::ModelLength), FinishReason::Length);
+        assert_eq!(FinishReason::from(CohereFinishReason::Error), FinishReason::Unknown);
+        assert_eq!(FinishReason::from(CohereFinishReason::ToolCalls), FinishReason::ToolCall);
+        assert_eq!(FinishReason::from(CohereFinishReason::Unknown), FinishReason::Unknown);
+    }
+
+    #[test]
+    fn test_cohere_usage_conversion() {
+        let cohere_usage = CohereUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+        };
+
+        let usage: Usage = cohere_usage.into();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_cohere_tool_call_conversion() {
+        let cohere_tool_call = CohereResponseToolCall {
+            id: "test_call_123".to_string(),
+            function: CohereResponseFunctionCall {
+                name: "get_weather".to_string(),
+                arguments: r#"{"location": "New York"}"#.to_string(),
+            },
+        };
+
+        let tool_call: ToolCall = cohere_tool_call.into();
+        assert_eq!(tool_call.id, "test_call_123");
+        assert_eq!(tool_call.name, "get_weather");
+        assert_eq!(tool_call.arguments, r#"{"location": "New York"}"#);
+    }
+
+    #[test]
+    fn test_prepare_cohere_tools() {
+        let request_with_specific_tool = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["What's the weather?".to_string().into()],
+            }],
+            system: None,
+            tool_config: Some(Cow::Borrowed(&WEATHER_TOOL_CONFIG)),
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        // Test with Auto tool choice
+        let mut modified_config = WEATHER_TOOL_CONFIG.clone();
+        modified_config.tool_choice = ToolChoice::Auto;
+        let request_auto = ModelInferenceRequest {
+            tool_config: Some(Cow::Owned(modified_config)),
+            ..request_with_specific_tool.clone()
+        };
+
+        let (tools, tool_choice) = prepare_cohere_tools(&request_auto).unwrap();
+        assert!(tools.is_some());
+        assert_eq!(tools.as_ref().unwrap().len(), 1);
+        assert_eq!(tool_choice, Some(CohereToolChoice::Auto));
+
+        // Test with Required tool choice
+        let mut modified_config = WEATHER_TOOL_CONFIG.clone();
+        modified_config.tool_choice = ToolChoice::Required;
+        let request_required = ModelInferenceRequest {
+            tool_config: Some(Cow::Owned(modified_config)),
+            ..request_with_specific_tool.clone()
+        };
+
+        let (tools, tool_choice) = prepare_cohere_tools(&request_required).unwrap();
+        assert!(tools.is_some());
+        assert_eq!(tools.as_ref().unwrap().len(), 1);
+        assert_eq!(tool_choice, Some(CohereToolChoice::Any));
+
+        // Test with None tool choice
+        let mut modified_config = WEATHER_TOOL_CONFIG.clone();
+        modified_config.tool_choice = ToolChoice::None;
+        let request_none = ModelInferenceRequest {
+            tool_config: Some(Cow::Owned(modified_config)),
+            ..request_with_specific_tool.clone()
+        };
+
+        let (tools, tool_choice) = prepare_cohere_tools(&request_none).unwrap();
+        assert!(tools.is_none());
+        assert_eq!(tool_choice, Some(CohereToolChoice::None));
+
+        // Test with no tool config
+        let request_no_tools = ModelInferenceRequest {
+            tool_config: None,
+            ..request_with_specific_tool.clone()
+        };
+
+        let (tools, tool_choice) = prepare_cohere_tools(&request_no_tools).unwrap();
+        assert!(tools.is_none());
+        assert!(tool_choice.is_none());
+    }
+
+    #[test]
+    fn test_cohere_response_format() {
+        // Test JSON object response format
+        let json_request = ModelInferenceRequest {
+            inference_id: Uuid::now_v7(),
+            messages: vec![RequestMessage {
+                role: Role::User,
+                content: vec!["Generate JSON".to_string().into()],
+            }],
+            system: None,
+            json_mode: ModelInferenceRequestJsonMode::On,
+            function_type: FunctionType::Chat,
+            output_schema: None,
+            extra_body: Default::default(),
+            ..Default::default()
+        };
+
+        let cohere_request = CohereRequest::new("command", &json_request).unwrap();
+        assert_eq!(
+            cohere_request.response_format,
+            Some(CohereResponseFormat::JsonObject)
+        );
+
+        // Test strict JSON mode (should also use JsonObject)
+        let strict_json_request = ModelInferenceRequest {
+            json_mode: ModelInferenceRequestJsonMode::Strict,
+            ..json_request.clone()
+        };
+
+        let cohere_request = CohereRequest::new("command", &strict_json_request).unwrap();
+        assert_eq!(
+            cohere_request.response_format,
+            Some(CohereResponseFormat::JsonObject)
+        );
+
+        // Test text response format (default)
+        let text_request = ModelInferenceRequest {
+            json_mode: ModelInferenceRequestJsonMode::Off,
+            ..json_request.clone()
+        };
+
+        let cohere_request = CohereRequest::new("command", &text_request).unwrap();
+        assert_eq!(cohere_request.response_format, None);
+    }
 }
