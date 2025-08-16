@@ -226,7 +226,7 @@ pub async fn test_provider_config_extra_body() {
     let inference_id = Uuid::parse_str(inference_id).unwrap();
 
     // Sleep to allow time for data to be inserted into ClickHouse (trailing writes from API)
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Check if ClickHouse is ok - ChatInference Table
     let clickhouse = get_clickhouse().await;
@@ -337,8 +337,8 @@ async fn test_default_function_default_tool_choice() {
         "tool_call"
     );
 
-    // Sleep for 100ms second to allow time for data to be inserted into ClickHouse (trailing writes from API)
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Sleep for 200ms second to allow time for data to be inserted into ClickHouse (trailing writes from API)
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Just check 'tool_choice' in the raw request, since we already have lots of tests
     // that check the full ChatInference/ModelInference rows
@@ -1700,4 +1700,36 @@ pub async fn test_parallel_tool_use_default_true_inference_request() {
         Value::Null,
     )
     .await;
+}
+
+#[tokio::test]
+pub async fn test_shorthand_embedding() {
+    let shorthand_model = "openai::text-embedding-3-small";
+    let payload = json!({
+        "input": "Hello, world!",
+        "model": shorthand_model,
+    });
+    let response = Client::new()
+        .post(get_gateway_endpoint("/openai/v1/embeddings"))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response_json = response.json::<Value>().await.unwrap();
+    println!("Shorthand API response: {response_json:?}");
+    assert_eq!(response_json["object"].as_str().unwrap(), "list");
+    assert_eq!(response_json["model"].as_str().unwrap(), shorthand_model);
+    assert_eq!(response_json["data"].as_array().unwrap().len(), 1);
+    assert_eq!(response_json["data"][0]["index"].as_u64().unwrap(), 0);
+    assert_eq!(
+        response_json["data"][0]["object"].as_str().unwrap(),
+        "embedding"
+    );
+    assert!(!response_json["data"][0]["embedding"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(response_json["usage"]["prompt_tokens"].as_u64().unwrap() > 0);
+    assert!(response_json["usage"]["total_tokens"].as_u64().unwrap() > 0);
 }
