@@ -31,13 +31,13 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::{clickhouse::ClickHouseConnectionInfo, config_parser::Config};
+use crate::{config::Config, db::clickhouse::ClickHouseConnectionInfo};
 
 lazy_static! {
     /// The URL to send usage data to.
     /// Configurable via the `TENSORZERO_HOWDY_URL` environment variable for testing.
     pub static ref HOWDY_URL: String =
-        env::var("TENSORZERO_HOWDY_URL").unwrap_or("https://howdy.tensorzero.com".to_string());
+        env::var("TENSORZERO_HOWDY_URL").unwrap_or_else(|_| "https://howdy.tensorzero.com".to_string());
 }
 
 /// Setup the howdy loop.

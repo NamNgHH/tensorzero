@@ -13,7 +13,6 @@ template_filesystem_access.enabled = true
 template_filesystem_access.base_path = "."
 export.otlp.traces.enabled = true
 unstable_error_json = true
-observability.skip_completed_migrations = true
 
 [object_storage]
 type = "disabled"
@@ -89,20 +88,38 @@ deployment_id = "gpt4o-mini-20240718"
 endpoint = "https://t0-azure-openai-east.openai.azure.com"
 api_key_location = "dynamic::azure_openai_api_key"
 
+[models."llama-3.3-70b-instruct-azure"]
+routing = ["azure"]
+
+[models."llama-3.3-70b-instruct-azure".providers.azure]
+type = "azure"
+deployment_id = "Llama-3.3-70B-Instruct"
+api_key_location = "env::AZURE_AI_FOUNDRY_API_KEY"
+endpoint = "https://t0-gha-resource.services.ai.azure.com"
+
+[models."llama-3.3-70b-instruct-azure-dynamic"]
+routing = ["azure"]
+
+[models."llama-3.3-70b-instruct-azure-dynamic".providers.azure]
+type = "azure"
+deployment_id = "Phi-4-mini-instruct"
+endpoint = "https://t0-gha-resource.services.ai.azure.com"
+api_key_location = "dynamic::azure_ai_foundry_api_key"
+
 ## Groq
 
-[models."mixtral-groq"]
+[models."groq-qwen"]
 routing = ["groq"]
 
-[models."mixtral-groq".providers.groq]
+[models."groq-qwen".providers.groq]
 type = "groq"
 model_name = "qwen/qwen3-32b"
 
 
-[models."mixtral-groq-dynamic"]
+[models."groq-qwen-dynamic"]
 routing = ["groq"]
 
-[models."mixtral-groq-dynamic".providers.groq]
+[models."groq-qwen-dynamic".providers.groq]
 type = "groq"
 model_name = "qwen/qwen3-32b"
 api_key_location = "dynamic::groq_api_key"
@@ -335,7 +352,7 @@ routing = ["fireworks"]
 
 [models."deepseek-r1".providers.fireworks]
 type = "fireworks"
-model_name = "accounts/fireworks/models/deepseek-r1"
+model_name = "accounts/fireworks/models/deepseek-r1-0528"
 
 [models.qwen2p5-72b-instruct.providers.fireworks]
 type = "fireworks"
@@ -727,6 +744,20 @@ type = "azure"
 endpoint = "https://t0-azure-openai-east.openai.azure.com/"
 deployment_id = "text-embedding-3-small"
 
+[embedding_models.voyage_3_5_lite_256]
+routing = ["voyage"]
+
+[embedding_models.voyage_3_5_lite_256.providers.voyage]
+type = "openai"
+api_base = "https://api.voyageai.com/v1"
+model_name = "voyage-3.5-lite"
+api_key_location = "env::VOYAGE_API_KEY"
+extra_body = [
+    { pointer = "/dimensions", delete = true },
+    { pointer = "/encoding_format", delete = true },
+    { pointer = "/output_dimension", value = 256 },
+]
+
 [embedding_models.fallback]
 routing = ["slow", "openai"]
 
@@ -750,6 +781,13 @@ non_streaming = { total_ms = 1000 }
 [embedding_models.timeout.providers.slow]
 type = "dummy"
 model_name = "slow"
+
+[embedding_models.dummy-embedding-model]
+routing = ["dummy"]
+
+[embedding_models.dummy-embedding-model.providers.dummy]
+type = "dummy"
+model_name = "test-embeddings"
 
 [models."command-a-03-2025"]
 routing = ["cohere"]
@@ -782,7 +820,7 @@ api_key_location = "dynamic::cohere_api_key"
 
 # ┌────────────────────────────────────────────────────────────────────────────┐
 # │                                 FUNCTIONS                                  │
-# └────────────────────────────────────────────────────────────────────────────┘
+# └────────────────────────────────────────────────────────────────────────────────┘
 
 # Timeout tests
 
@@ -872,9 +910,10 @@ type = "chat"
 [functions.basic_test_template_no_schema.variants.test]
 type = "chat_completion"
 model = "dummy::echo_request_messages"
-system_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/system_template.minijinja"
+input_wrappers.system = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/system_template.minijinja"
 assistant_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/assistant_template.minijinja"
 user_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/user_template.minijinja"
+templates.my_custom_template.path = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/my_custom_template.minijinja"
 
 [functions.basic_test_template_no_schema.variants.mixture_of_n]
 type = "experimental_mixture_of_n"
@@ -883,7 +922,7 @@ candidates = ["test", "test"]
 [functions.basic_test_template_no_schema.variants.mixture_of_n.fuser]
 model = "dummy::echo_request_messages"
 system_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/system_template_2.minijinja"
-assistant_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/assistant_template_2.minijinja"
+input_wrappers.assistant = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/assistant_template_2.minijinja"
 user_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/user_template_2.minijinja"
 
 [functions.basic_test_template_no_schema.variants.best_of_n]
@@ -894,7 +933,7 @@ candidates = ["test", "test"]
 model = "dummy::best_of_n_0"
 system_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/system_template_2.minijinja"
 assistant_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/assistant_template_2.minijinja"
-user_template = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/user_template_2.minijinja"
+input_wrappers.user = "../../fixtures/config/functions/basic_test_template_no_schema/prompt/user_template_2.minijinja"
 
 
 [functions.basic_test_no_system_schema]
@@ -1066,15 +1105,41 @@ model = "gpt-4o-mini-azure-dynamic"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 100
 
+[functions.basic_test.variants.azure-ai-foundry]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+
+[functions.basic_test.variants.azure-ai-foundry-extra-body]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+extra_body = [{ pointer = "/temperature", value = 0.123 }]
+
+[functions.basic_test.variants.azure-ai-foundry-extra-headers]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+extra_headers = [{ name = "api-key", value = "invalid_azure_openai_auth" }]
+
+[functions.basic_test.variants.azure-ai-foundry-dynamic]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure-dynamic"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+max_tokens = 100
+
 [functions.basic_test.variants.fireworks]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 500
 
 [functions.basic_test.variants.fireworks-extra-body]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/deepseek-r1-0528"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 100
 extra_body = [{ pointer = "/temperature", value = 0.123 }]
@@ -1088,7 +1153,7 @@ extra_headers = [{ name = "Authorization", value = "invalid_fireworks_auth" }]
 
 [functions.basic_test.variants.fireworks-dynamic]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 100
 
@@ -1202,7 +1267,7 @@ extra_headers = [{ name = "Content-Length", value = "2" }]
 
 [functions.basic_test.variants.groq]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 500
 
@@ -1214,14 +1279,14 @@ max_tokens = 100
 
 [functions.basic_test.variants.groq-extra-body]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 100
 extra_body = [{ pointer = "/temperature", value = 0.123 }]
 
 [functions.basic_test.variants.groq-extra-headers]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 100
 extra_headers = [
@@ -1230,7 +1295,7 @@ extra_headers = [
 
 [functions.basic_test.variants.groq-dynamic]
 type = "chat_completion"
-model = "mixtral-groq-dynamic"
+model = "groq-qwen-dynamic"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 max_tokens = 100
 
@@ -1732,7 +1797,7 @@ json_mode = "strict"
 
 [functions.json_success]
 type = "json"
-system_schema = "../../fixtures/config/functions/basic_test/system_schema.json"
+schemas.system.path = "../../fixtures/config/functions/basic_test/system_schema.json"
 user_schema = "../../fixtures/config/functions/json_success/user_schema.json"
 output_schema = "../../fixtures/config/functions/basic_test/output_schema.json"
 
@@ -1741,7 +1806,7 @@ type = "chat_completion"
 weight = 1
 model = "json"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
-user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+templates.user.path = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 max_tokens = 100
 json_mode = "strict"
 
@@ -1834,9 +1899,33 @@ user_template = "../../fixtures/config/functions/json_success/prompt/user_templa
 json_mode = "implicit_tool"
 max_tokens = 100
 
+[functions.json_success.variants.azure-ai-foundry]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+json_mode = "on"
+max_tokens = 100
+
+[functions.json_success.variants.azure-ai-foundry-strict]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+max_tokens = 100
+json_mode = "strict"
+
+[functions.json_success.variants.azure-ai-foundry-implicit]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+json_mode = "implicit_tool"
+max_tokens = 100
+
 [functions.json_success.variants.fireworks]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 json_mode = "on"
@@ -1854,7 +1943,7 @@ max_tokens = 100
 
 [functions.json_success.variants.fireworks-implicit]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 json_mode = "implicit_tool"
@@ -1878,7 +1967,7 @@ max_tokens = 800
 
 [functions.json_success.variants.fireworks-strict]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 max_tokens = 100
@@ -1999,7 +2088,7 @@ max_tokens = 500
 
 [functions.json_success.variants.groq]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 json_mode = "on"
@@ -2007,7 +2096,7 @@ max_tokens = 500
 
 [functions.json_success.variants.groq-implicit]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 json_mode = "implicit_tool"
@@ -2015,7 +2104,7 @@ max_tokens = 500
 
 [functions.json_success.variants.groq-strict]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/json_success/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 json_mode = "strict"
@@ -2297,6 +2386,14 @@ user_template = "../../fixtures/config/functions/json_success/prompt/user_templa
 json_mode = "off"
 max_tokens = 100
 
+[functions.json_success.variants.azure-ai-foundry_json_mode_off]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
+json_mode = "off"
+max_tokens = 100
+
 [functions.json_success.variants.deepseek_chat_json_mode_off]
 type = "chat_completion"
 model = "deepseek-chat"
@@ -2307,7 +2404,7 @@ max_tokens = 100
 
 [functions.json_success.variants.fireworks_json_mode_off]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/basic_test/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/json_success/prompt/user_template.minijinja"
 json_mode = "off"
@@ -2527,9 +2624,33 @@ user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_templa
 json_mode = "implicit_tool"
 max_tokens = 100
 
+[functions.dynamic_json.variants.azure-ai-foundry]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
+json_mode = "on"
+max_tokens = 100
+
+[functions.dynamic_json.variants.azure-ai-foundry-strict]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
+max_tokens = 100
+json_mode = "strict"
+
+[functions.dynamic_json.variants.azure-ai-foundry-implicit]
+type = "chat_completion"
+model = "llama-3.3-70b-instruct-azure"
+system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
+user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
+json_mode = "implicit_tool"
+max_tokens = 100
+
 [functions.dynamic_json.variants.fireworks]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
 json_mode = "on"
@@ -2537,7 +2658,7 @@ max_tokens = 100
 
 [functions.dynamic_json.variants.fireworks-strict]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
 max_tokens = 100
@@ -2545,7 +2666,7 @@ json_mode = "strict"
 
 [functions.dynamic_json.variants.fireworks-implicit]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
 json_mode = "implicit_tool"
@@ -2665,7 +2786,7 @@ max_tokens = 100
 
 [functions.dynamic_json.variants.groq]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
 json_mode = "on"
@@ -2673,7 +2794,7 @@ max_tokens = 500
 
 [functions.dynamic_json.variants.groq-strict]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
 max_tokens = 500
@@ -2681,7 +2802,7 @@ json_mode = "strict"
 
 [functions.dynamic_json.variants.groq-implicit]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/dynamic_json/prompt/system_template.minijinja"
 user_template = "../../fixtures/config/functions/dynamic_json/prompt/user_template.minijinja"
 json_mode = "implicit_tool"
@@ -3067,7 +3188,7 @@ max_tokens = 100
 
 [functions.weather_helper.variants.fireworks]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_template = "../../fixtures/config/functions/weather_helper/prompt/system_template.minijinja"
 max_tokens = 100
 
@@ -3109,7 +3230,7 @@ max_tokens = 100
 
 [functions.weather_helper.variants.groq]
 type = "chat_completion"
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/weather_helper/prompt/system_template.minijinja"
 max_tokens = 500
 
@@ -3203,7 +3324,7 @@ system_template = "../../fixtures/config/functions/weather_helper_parallel/promp
 [functions.weather_helper_parallel.variants.groq]
 type = "chat_completion"
 weight = 1
-model = "mixtral-groq"
+model = "groq-qwen"
 system_template = "../../fixtures/config/functions/weather_helper_parallel/prompt/system_template.minijinja"
 
 [functions.weather_helper_parallel.variants.together-tool]
@@ -3469,7 +3590,7 @@ json_mode = "strict"
 type = "chat"
 tools = ["think", "search_wikipedia", "load_wikipedia_page", "answer_question"]
 tool_choice = "required"
-parallel_tool_calls = true
+parallel_tool_calls = false
 
 [functions.multi_hop_rag_agent.variants.baseline]
 type = "chat_completion"
@@ -3896,7 +4017,7 @@ json_mode = "strict"
 
 [evaluations.best_of_3.evaluators.llm_judge_bool.variants.llama_promptA]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_instructions = "../../fixtures/config/evaluations/best_of_3/llm_judge_bool/system_instructions.txt"
 json_mode = "strict"
 
@@ -3934,7 +4055,7 @@ json_mode = "strict"
 
 [evaluations.mixture_of_3.evaluators.llm_judge_bool.variants.llama_promptA]
 type = "chat_completion"
-model = "fireworks::accounts/fireworks/models/mixtral-8x22b-instruct"
+model = "fireworks::accounts/fireworks/models/deepseek-v3p1"
 system_instructions = "../../fixtures/config/evaluations/best_of_3/llm_judge_bool/system_instructions.txt"
 json_mode = "strict"
 

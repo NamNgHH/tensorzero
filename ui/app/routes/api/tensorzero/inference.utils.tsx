@@ -2,6 +2,7 @@ import * as React from "react";
 import { useFetcher, type FetcherFormProps } from "react-router";
 import type { SubmitTarget, FetcherSubmitOptions } from "react-router";
 import type { DisplayInputMessage } from "~/utils/clickhouse/common";
+import { DEFAULT_FUNCTION } from "~/utils/constants";
 import type {
   CacheParamsOptions,
   ClientInput,
@@ -32,9 +33,9 @@ import type { InferenceResponse } from "~/utils/tensorzero";
 import { logger } from "~/utils/logger";
 import type {
   ClientInferenceParams,
-  ResolvedInput as TensorZeroResolvedInput,
-  ResolvedInputMessage as TensorZeroResolvedInputMessage,
-  ResolvedInputMessageContent as TensorZeroResolvedInputMessageContent,
+  StoredInput as TensorZeroStoredInput,
+  StoredInputMessage as TensorZeroStoredInputMessage,
+  StoredInputMessageContent as TensorZeroStoredInputMessageContent,
   ToolCallConfigDatabaseInsert,
   ContentBlockChatOutput,
   JsonInferenceOutput,
@@ -189,32 +190,32 @@ export function useInferenceActionFetcher() {
   } satisfies ActionFetcher;
 }
 
-// Convert TensorZero's ResolvedInput to our Input type
-export function tensorZeroResolvedInputToInput(
-  resolvedInput: TensorZeroResolvedInput,
+// Convert TensorZero's StoredInput to our Input type
+export function tensorZeroStoredInputToInput(
+  resolvedInput: TensorZeroStoredInput,
 ): Input {
   return {
     system: resolvedInput.system ?? undefined,
-    messages: resolvedInput.messages.map(
-      tensorZeroResolvedMessageToInputMessage,
-    ),
+    messages: resolvedInput.messages.map(tensorZeroStoredMessageToInputMessage),
   };
 }
 
-function tensorZeroResolvedMessageToInputMessage(
-  message: TensorZeroResolvedInputMessage,
+function tensorZeroStoredMessageToInputMessage(
+  message: TensorZeroStoredInputMessage,
 ): InputMessage {
   return {
     role: message.role,
-    content: message.content.map(tensorZeroResolvedContentToInputContent),
+    content: message.content.map(tensorZeroStoredContentToInputContent),
   };
 }
 
-function tensorZeroResolvedContentToInputContent(
-  content: TensorZeroResolvedInputMessageContent,
+function tensorZeroStoredContentToInputContent(
+  content: TensorZeroStoredInputMessageContent,
 ): InputMessageContent {
   switch (content.type) {
     case "text":
+      return content;
+    case "template":
       return content;
     case "tool_call":
       return {
@@ -281,6 +282,13 @@ interface InferenceActionArgs {
   variant: string;
 }
 
+interface InferenceDefaultFunctionActionArgs {
+  source: "inference";
+  resource: ParsedInferenceRow;
+  variant?: undefined;
+  model_name: string;
+}
+
 interface DatapointActionArgs {
   source: "datapoint";
   resource: ParsedDatasetRow;
@@ -301,11 +309,23 @@ interface ClickHouseDatapointActionArgs {
   functionConfig: FunctionConfig;
 }
 
+type ActionArgs =
+  | InferenceActionArgs
+  | InferenceDefaultFunctionActionArgs
+  | DatapointActionArgs
+  | ClickHouseDatapointActionArgs;
+
+function isDefaultFunctionArgs(
+  args: ActionArgs,
+): args is InferenceDefaultFunctionActionArgs {
+  return (
+    args.source === "inference" &&
+    args.resource.function_name === DEFAULT_FUNCTION
+  );
+}
+
 export function prepareInferenceActionRequest(
-  args:
-    | InferenceActionArgs
-    | DatapointActionArgs
-    | ClickHouseDatapointActionArgs,
+  args: ActionArgs,
 ): ClientInferenceParams {
   // Create base ClientInferenceParams with default values
   const baseParams: ClientInferenceParams = {
@@ -345,13 +365,10 @@ export function prepareInferenceActionRequest(
   };
 
   // Prepare request based on source and function type
-  if (
-    args.source === "inference" &&
-    args.resource.function_name === "tensorzero::default"
-  ) {
+  if (isDefaultFunctionArgs(args)) {
     const defaultRequest = prepareDefaultFunctionRequest(
       args.resource,
-      args.variant,
+      args.model_name,
     );
     return { ...baseParams, ...defaultRequest };
   } else if (args.source === "clickhouse_datapoint") {
@@ -497,6 +514,7 @@ function resolvedInputMessageContentToTensorZeroContent(
     case "tool_call":
     case "tool_result":
     case "thought":
+    case "template":
     case "unknown":
       return content;
     case "file":
@@ -537,6 +555,8 @@ function resolvedInputMessageContentToClientInputMessageContent(
         type: "text",
         arguments: content.arguments,
       };
+    case "template":
+      return content;
     case "unstructured_text":
       return {
         type: "text",
@@ -637,6 +657,7 @@ function variantInfoToUninitalizedVariantInfo(
         type: "chat_completion" as const,
         weight: inner.weight,
         model: inner.model,
+        input_wrappers: null,
         system_template: convertTemplate(
           inner.templates.system?.template || null,
         ),
@@ -644,6 +665,7 @@ function variantInfoToUninitalizedVariantInfo(
         assistant_template: convertTemplate(
           inner.templates.assistant?.template || null,
         ),
+        templates: {},
         temperature: inner.temperature,
         max_tokens: inner.max_tokens,
         seed: inner.seed,
@@ -665,6 +687,7 @@ function variantInfoToUninitalizedVariantInfo(
         evaluator: {
           weight: inner.evaluator.weight,
           model: inner.evaluator.model,
+          input_wrappers: null,
           system_template: convertTemplate(
             inner.evaluator.templates.system?.template || null,
           ),
@@ -674,6 +697,7 @@ function variantInfoToUninitalizedVariantInfo(
           assistant_template: convertTemplate(
             inner.evaluator.templates.assistant?.template || null,
           ),
+          templates: {},
           temperature: inner.evaluator.temperature,
           top_p: inner.evaluator.top_p,
           max_tokens: inner.evaluator.max_tokens,
@@ -716,6 +740,7 @@ function variantInfoToUninitalizedVariantInfo(
         fuser: {
           weight: inner.fuser.weight,
           model: inner.fuser.model,
+          input_wrappers: null,
           system_template: convertTemplate(
             inner.fuser.templates.system?.template || null,
           ),
@@ -725,6 +750,7 @@ function variantInfoToUninitalizedVariantInfo(
           assistant_template: convertTemplate(
             inner.fuser.templates.assistant?.template || null,
           ),
+          templates: {},
           temperature: inner.fuser.temperature,
           top_p: inner.fuser.top_p,
           max_tokens: inner.fuser.max_tokens,
@@ -743,6 +769,8 @@ function variantInfoToUninitalizedVariantInfo(
         type: "experimental_chain_of_thought" as const,
         weight: inner.weight,
         model: inner.model,
+        input_wrappers: null,
+        templates: {},
         system_template: convertTemplate(
           inner.templates.system?.template || null,
         ),

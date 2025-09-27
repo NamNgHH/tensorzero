@@ -10,6 +10,7 @@ import {
   GridCheck,
   SequenceChecks,
   Playground,
+  Model,
 } from "~/components/icons/Icons";
 import { useSidebar } from "~/components/ui/sidebar";
 import { useActivePath } from "~/hooks/use-active-path";
@@ -63,6 +64,11 @@ const navigation: NavigationSection[] = [
         url: "/observability/functions",
         icon: Functions,
       },
+      {
+        title: "Models",
+        url: "/observability/models",
+        icon: Model,
+      },
     ],
   },
   {
@@ -104,7 +110,7 @@ const navigation: NavigationSection[] = [
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { state } = useSidebar();
-  const isActivePath = useActivePath();
+  const activePathUtils = useActivePath();
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -132,7 +138,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
               <SidebarMenuButton
                 asChild
                 tooltip={state === "collapsed" ? "Dashboard" : undefined}
-                isActive={isActivePath("/")}
+                isActive={activePathUtils.isActive("/")}
               >
                 <Link to="/" className="flex items-center gap-2">
                   <Home className="h-4 w-4" />
@@ -153,7 +159,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
                   <SidebarMenuButton
                     asChild
                     tooltip={state === "collapsed" ? item.title : undefined}
-                    isActive={isActivePath(item.url)}
+                    isActive={activePathUtils.isActive(item.url)}
                   >
                     <Link
                       to={item.url}

@@ -7,7 +7,7 @@ use std::{
 use tensorzero::{
     ChatInferenceDatapoint, Client, ClientBuilder, ClientBuilderMode, JsonInferenceDatapoint,
 };
-use tensorzero_core::clickhouse::{
+use tensorzero_core::db::clickhouse::{
     test_helpers::{get_clickhouse, CLICKHOUSE_URL},
     TableName,
 };
@@ -71,8 +71,10 @@ pub async fn get_tensorzero_client() -> Client {
             std::env::var("CARGO_MANIFEST_DIR").unwrap()
         ))),
         clickhouse_url: Some(CLICKHOUSE_URL.clone()),
+        postgres_url: None,
         timeout: None,
         verify_credentials: true,
+        allow_batch_writes: true,
     })
     .build()
     .await

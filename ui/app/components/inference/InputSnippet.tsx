@@ -26,6 +26,7 @@ interface InputSnippetProps {
   isEditing?: boolean;
   onSystemChange?: (system: string | object) => void;
   onMessagesChange?: (messages: DisplayInputMessage[]) => void;
+  maxHeight?: number | "Content";
 }
 
 function renderContentBlock(
@@ -151,6 +152,42 @@ function renderContentBlock(
 
     case "file_error":
       return <FileErrorMessage key={key} error="Failed to retrieve file" />;
+
+    case "unknown":
+      // TODO: code editor should format as JSON by default
+      return (
+        <TextMessage
+          key={key}
+          label="Unknown Content"
+          content={JSON.stringify(block.data)}
+        />
+      );
+
+    case "thought":
+      return (
+        <TextMessage
+          key={key}
+          label="Thought"
+          content={block.text || ""}
+          isEditing={isEditing}
+          onChange={(updatedText) => {
+            onChange?.({ ...block, text: updatedText });
+          }}
+        />
+      );
+
+    case "template":
+      return (
+        <ParameterizedMessage
+          key={key}
+          parameters={block.arguments}
+          templateName={block.name}
+          isEditing={isEditing}
+          onChange={(updatedArguments) => {
+            onChange?.({ ...block, arguments: updatedArguments });
+          }}
+        />
+      );
   }
 }
 
@@ -160,6 +197,7 @@ export default function InputSnippet({
   isEditing,
   onSystemChange,
   onMessagesChange,
+  maxHeight,
 }: InputSnippetProps) {
   const onContentBlockChange = (
     messageIndex: number,
@@ -178,13 +216,13 @@ export default function InputSnippet({
   return (
     <SnippetLayout>
       {!system && messages.length === 0 && (
-        <SnippetContent>
+        <SnippetContent maxHeight={maxHeight}>
           <EmptyMessage message="Empty input" />
         </SnippetContent>
       )}
 
       {system && (
-        <SnippetContent>
+        <SnippetContent maxHeight={maxHeight}>
           <SnippetMessage role="system">
             {typeof system === "object" ? (
               <ParameterizedMessage
@@ -204,7 +242,7 @@ export default function InputSnippet({
       )}
 
       {messages.length > 0 && (
-        <SnippetContent>
+        <SnippetContent maxHeight={maxHeight}>
           {messages.map((message, messageIndex) => (
             <SnippetMessage role={message.role} key={messageIndex}>
               {message.content.map((block, contentBlockIndex) =>

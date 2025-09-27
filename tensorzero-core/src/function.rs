@@ -1,4 +1,4 @@
-use crate::config_parser::SchemaData;
+use crate::config::SchemaData;
 use crate::error::IMPOSSIBLE_ERROR_MESSAGE;
 #[cfg(feature = "pyo3")]
 use crate::inference::types::pyo3_helpers::serialize_to_dict;
@@ -17,7 +17,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tracing::instrument;
 use uuid::Uuid;
@@ -221,6 +221,21 @@ pub struct FunctionConfigChat {
     pub tool_choice: ToolChoice,
     pub parallel_tool_calls: Option<bool>,
     pub description: Option<String>,
+    // Holds all template names (e.g. 'user', 'my_custom_template'
+    // which can be invoked through a `{"type": "template", "name": "..."}` input block)
+    // This is used to perform early rejection of a template invocation,
+    // in the case where all variants either:
+    // * do not have the template defined at all, or
+    // * define the template as an old-style input wrapper
+    //   (which can only be invoked by a {`"type": "text", "text": "..."`} input block)
+    //
+    // If it least one variant defines the template as a named template (non legacy-input-wrapper),
+    // then its name will be included in this set, and we'll let the request go through.
+    // The early rejection logic improves error messages in the case where every variant invocation
+    // is guaranteed to fail - we avoid showing an 'All variants failed' error message with
+    // the same template error for every variant.
+    #[serde(skip)]
+    pub all_explicit_templates_names: HashSet<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -232,6 +247,9 @@ pub struct FunctionConfigJson {
     pub output_schema: StaticJSONSchema, // schema is mandatory for JSON functions
     pub implicit_tool_call_config: ToolCallConfig,
     pub description: Option<String>,
+    // See `FunctionConfigChat.all_explicit_template_names`.
+    #[serde(skip)]
+    pub all_explicit_template_names: HashSet<String>,
 }
 
 impl FunctionConfig {
@@ -267,18 +285,16 @@ impl FunctionConfig {
         match &self {
             FunctionConfig::Chat(params) => {
                 validate_all_text_input(
-                    params.schemas.system.as_ref(),
-                    params.schemas.user.as_ref(),
-                    params.schemas.assistant.as_ref(),
+                    &params.schemas,
                     input,
+                    &params.all_explicit_templates_names,
                 )?;
             }
             FunctionConfig::Json(params) => {
                 validate_all_text_input(
-                    params.schemas.system.as_ref(),
-                    params.schemas.user.as_ref(),
-                    params.schemas.assistant.as_ref(),
+                    &params.schemas,
                     input,
+                    &params.all_explicit_template_names,
                 )?;
             }
         }
@@ -412,22 +428,22 @@ impl FunctionConfig {
 
     pub fn system_schema(&self) -> Option<&StaticJSONSchema> {
         match self {
-            FunctionConfig::Chat(params) => params.schemas.system.as_ref(),
-            FunctionConfig::Json(params) => params.schemas.system.as_ref(),
+            FunctionConfig::Chat(params) => params.schemas.get_implicit_system_schema(),
+            FunctionConfig::Json(params) => params.schemas.get_implicit_system_schema(),
         }
     }
 
     pub fn user_schema(&self) -> Option<&StaticJSONSchema> {
         match self {
-            FunctionConfig::Chat(params) => params.schemas.user.as_ref(),
-            FunctionConfig::Json(params) => params.schemas.user.as_ref(),
+            FunctionConfig::Chat(params) => params.schemas.get_implicit_user_schema(),
+            FunctionConfig::Json(params) => params.schemas.get_implicit_user_schema(),
         }
     }
 
     pub fn assistant_schema(&self) -> Option<&StaticJSONSchema> {
         match self {
-            FunctionConfig::Chat(params) => params.schemas.assistant.as_ref(),
-            FunctionConfig::Json(params) => params.schemas.assistant.as_ref(),
+            FunctionConfig::Chat(params) => params.schemas.get_implicit_assistant_schema(),
+            FunctionConfig::Json(params) => params.schemas.get_implicit_assistant_schema(),
         }
     }
 
@@ -523,15 +539,21 @@ fn get_json_output_from_content_blocks(
 /// The validation is done based on the input's role and the function's schemas.
 /// We first validate the system message (if it exists)
 /// Next we validate all messages containing text blocks.
+/// When we add support for `{"type": "template"}` input blocks, we'll need to validate those two
 fn validate_all_text_input(
-    system_schema: Option<&StaticJSONSchema>,
-    user_schema: Option<&StaticJSONSchema>,
-    assistant_schema: Option<&StaticJSONSchema>,
+    schemas: &SchemaData,
     input: &Input,
+    all_templates_names: &HashSet<String>,
 ) -> Result<(), Error> {
-    match (input.system.as_ref(), system_schema) {
+    match (input.system.as_ref(), schemas.get_implicit_system_schema()) {
         // If there is any system message passed we validate it
-        (Some(system), _) => validate_single_message(system, system_schema, None),
+        (Some(system), _) => validate_single_message(
+            system,
+            schemas.get_implicit_system_schema(),
+            "system",
+            all_templates_names,
+            None,
+        ),
         // If there is no system message and no schema we accept
         (None, None) => Ok(()),
         // If no system message is passed and we have a schema we fail
@@ -540,21 +562,40 @@ fn validate_all_text_input(
         })),
     }?;
     for (index, message) in input.messages.iter().enumerate() {
-        // Only for Text blocks, not RawText blocks since we don't validate those
         for block in &message.content {
-            if let InputMessageContent::Text(kind) = block {
-                let content = match kind {
-                    TextKind::Arguments { arguments } => {
-                        Cow::Owned(Value::Object(arguments.clone()))
-                    }
-                    TextKind::Text { text } => Cow::Owned(Value::String(text.clone())),
-                    TextKind::LegacyValue { value } => Cow::Borrowed(value),
-                };
-                let schema = match &message.role {
-                    Role::Assistant => assistant_schema,
-                    Role::User => user_schema,
-                };
-                validate_single_message(&content, schema, Some((index, &message.role)))?;
+            match block {
+                InputMessageContent::Text(kind) => {
+                    let content = match kind {
+                        TextKind::Arguments { arguments } => {
+                            Cow::Owned(Value::Object(arguments.clone()))
+                        }
+                        TextKind::Text { text } => Cow::Owned(Value::String(text.clone())),
+                        TextKind::LegacyValue { value } => Cow::Borrowed(value),
+                    };
+                    let schema = match &message.role {
+                        Role::Assistant => schemas.get_implicit_assistant_schema(),
+                        Role::User => schemas.get_implicit_user_schema(),
+                    };
+                    validate_single_message(
+                        &content,
+                        schema,
+                        message.role.implicit_template_name(),
+                        all_templates_names,
+                        Some(index),
+                    )?;
+                }
+                InputMessageContent::Template(template) => {
+                    // TODO - figure out a way to avoid this clone
+                    let value = Value::Object(template.arguments.clone());
+                    validate_single_message(
+                        &value,
+                        schemas.get_named_schema(&template.name),
+                        &template.name,
+                        all_templates_names,
+                        Some(index),
+                    )?;
+                }
+                _ => {}
             }
         }
     }
@@ -562,30 +603,32 @@ fn validate_all_text_input(
 }
 
 /// Validates a single message according to the following rules:
-/// If there is no schema, the message `content` must be a string
+/// If there is no schema, we check that at least one
+/// variant has a matching template (as determined by `all_templates_names`)
 /// Otherwise, the message must contain JSON content that matches the schema
 fn validate_single_message(
     content: &Value,
     schema: Option<&StaticJSONSchema>,
-    index_role: Option<(usize, &Role)>,
+    template_name: &str,
+    all_templates_names: &HashSet<String>,
+    index: Option<usize>,
 ) -> Result<(), Error> {
     match schema {
-        Some(schema) => schema.validate(content),
+        Some(schema) => schema.validate(content)?,
         None => {
-            if content.is_string() {
-                Ok(())
-            } else {
-                Err(match index_role {
-                    Some(index_role) => Error::new(ErrorDetails::InvalidMessage {
-                        message: format!("Message at index {} has non-string content but there is no schema given for role {}.", index_role.0, index_role.1),
+            if !content.is_string() && !all_templates_names.contains(template_name) {
+                return Err(match index {
+                    Some(index) => Error::new(ErrorDetails::InvalidMessage {
+                        message: format!("Message at index {index} has non-string content but there is no template `{template_name}` in any variant"),
                     }),
                     None => Error::new(ErrorDetails::InvalidMessage {
-                        message: "Message has non-string content but there is no schema given for role system.".to_string(),
+                        message: format!("System message has non-string content but there is no template `{template_name}` in any variant"),
                     }),
-                })
+                });
             }
         }
     }
+    Ok(())
 }
 
 /// Sample a variant from the function based on variant weights (uniform random selection)
@@ -685,21 +728,25 @@ fn get_uniform_value(function_name: &str, episode_id: &Uuid) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::ErrorContext;
     use crate::endpoints::inference::InferenceIds;
     use crate::inference::types::FinishReason;
     use crate::inference::types::InputMessage;
     use crate::inference::types::Latency;
+    use crate::inference::types::RequestMessagesOrBatch;
     use crate::inference::types::Text;
     use crate::inference::types::Thought;
     use crate::inference::types::Usage;
     use crate::jsonschema_util::DynamicJSONSchema;
     use crate::minijinja_util::TemplateConfig;
     use crate::tool::ToolCall;
-    use crate::variant::chat_completion::ChatCompletionConfig;
+
+    use crate::variant::chat_completion::UninitializedChatCompletionConfig;
     use crate::variant::VariantConfig;
 
     use super::*;
-    use crate::config_parser::path::TomlRelativePath;
+    use crate::config::path::ResolvedTomlPath;
+    use crate::config::UninitializedSchemas;
     use serde_json::json;
     use std::io::Write;
     use std::time::Duration;
@@ -722,7 +769,7 @@ mod tests {
         let mut temp_file = NamedTempFile::new().expect("Failed to create temporary file");
         write!(temp_file, "{schema}").expect("Failed to write schema to temporary file");
 
-        StaticJSONSchema::from_path(TomlRelativePath::new_for_tests(
+        StaticJSONSchema::from_path(ResolvedTomlPath::new_for_tests(
             temp_file.path().to_owned(),
             None,
         ))
@@ -781,7 +828,7 @@ mod tests {
         assert_eq!(
             validation_result.unwrap_err(),
             Error::new(ErrorDetails::InvalidMessage {
-                message: "Message at index 1 has non-string content but there is no schema given for role assistant.".to_string(),
+                message: "Message at index 1 has non-string content but there is no template `assistant` in any variant".to_string(),
             })
         );
 
@@ -814,10 +861,14 @@ mod tests {
         let system_value = system_schema.value.clone();
         let chat_config = FunctionConfigChat {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                system: Some(system_schema),
-                ..Default::default()
-            },
+            schemas: SchemaData::load(
+                None,
+                None,
+                Some(system_schema),
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             tools: vec![],
             ..Default::default()
         };
@@ -872,10 +923,14 @@ mod tests {
         let user_value = user_schema.value.clone();
         let chat_config = FunctionConfigChat {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                user: Some(user_schema),
-                ..Default::default()
-            },
+            schemas: SchemaData::load(
+                Some(user_schema),
+                None,
+                None,
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             tools: vec![],
             ..Default::default()
         };
@@ -932,10 +987,14 @@ mod tests {
         let assistant_value = assistant_schema.value.clone();
         let chat_config = FunctionConfigChat {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                assistant: Some(assistant_schema),
-                ..Default::default()
-            },
+            schemas: SchemaData::load(
+                None,
+                Some(assistant_schema),
+                None,
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             tools: vec![],
             ..Default::default()
         };
@@ -997,11 +1056,14 @@ mod tests {
         let system_value = system_schema.value.clone();
         let chat_config = FunctionConfigChat {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                system: Some(system_schema),
-                user: Some(user_schema),
-                assistant: Some(assistant_schema),
-            },
+            schemas: SchemaData::load(
+                Some(user_schema),
+                Some(assistant_schema),
+                Some(system_schema),
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             tools: vec![],
             ..Default::default()
         };
@@ -1073,11 +1135,14 @@ mod tests {
         let assistant_schema = create_test_schema();
         let chat_config = FunctionConfigChat {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                system: Some(system_schema),
-                user: Some(user_schema),
-                assistant: Some(assistant_schema),
-            },
+            schemas: SchemaData::load(
+                Some(user_schema),
+                Some(assistant_schema),
+                Some(system_schema),
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             tools: vec![],
             ..Default::default()
         };
@@ -1154,11 +1219,14 @@ mod tests {
         let assistant_schema = create_test_schema();
         let chat_config = FunctionConfigChat {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                system: None,
-                user: Some(user_schema),
-                assistant: Some(assistant_schema),
-            },
+            schemas: SchemaData::load(
+                Some(user_schema),
+                Some(assistant_schema),
+                None,
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             tools: vec![],
             ..Default::default()
         };
@@ -1208,6 +1276,7 @@ mod tests {
             output_schema: StaticJSONSchema::from_value(json!({})).unwrap(),
             implicit_tool_call_config,
             description: None,
+            all_explicit_template_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Json(tool_config);
 
@@ -1262,7 +1331,7 @@ mod tests {
         assert_eq!(
             validation_result.unwrap_err(),
             ErrorDetails::InvalidMessage {
-                message: "Message at index 0 has non-string content but there is no schema given for role user.".to_string()
+                message: "Message at index 0 has non-string content but there is no template `user` in any variant".to_string()
             }.into()
         );
     }
@@ -1275,13 +1344,18 @@ mod tests {
         let implicit_tool_call_config = ToolCallConfig::implicit_from_value(&output_schema);
         let tool_config = FunctionConfigJson {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                system: Some(system_schema),
-                ..Default::default()
-            },
+            schemas: SchemaData::load(
+                None,
+                None,
+                Some(system_schema),
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             output_schema: StaticJSONSchema::from_value(output_schema).unwrap(),
             implicit_tool_call_config,
             description: None,
+            all_explicit_template_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Json(tool_config);
 
@@ -1339,13 +1413,18 @@ mod tests {
         let implicit_tool_call_config = ToolCallConfig::implicit_from_value(&output_schema);
         let tool_config = FunctionConfigJson {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                user: Some(user_schema),
-                ..Default::default()
-            },
+            schemas: SchemaData::load(
+                Some(user_schema),
+                None,
+                None,
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             output_schema: StaticJSONSchema::from_value(output_schema).unwrap(),
             implicit_tool_call_config,
             description: None,
+            all_explicit_template_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Json(tool_config);
 
@@ -1404,13 +1483,18 @@ mod tests {
         let implicit_tool_call_config = ToolCallConfig::implicit_from_value(&output_schema);
         let tool_config = FunctionConfigJson {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                assistant: Some(assistant_schema),
-                ..Default::default()
-            },
+            schemas: SchemaData::load(
+                None,
+                Some(assistant_schema),
+                None,
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             output_schema: StaticJSONSchema::from_value(output_schema).unwrap(),
             implicit_tool_call_config,
             description: None,
+            all_explicit_template_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Json(tool_config);
 
@@ -1473,14 +1557,18 @@ mod tests {
         let implicit_tool_call_config = ToolCallConfig::implicit_from_value(&output_schema);
         let tool_config = FunctionConfigJson {
             variants: HashMap::new(),
-            schemas: SchemaData {
-                system: Some(system_schema),
-                user: Some(user_schema),
-                assistant: Some(assistant_schema),
-            },
+            schemas: SchemaData::load(
+                Some(user_schema),
+                Some(assistant_schema),
+                Some(system_schema),
+                UninitializedSchemas::default(),
+                "test",
+            )
+            .unwrap(),
             output_schema: StaticJSONSchema::from_value(output_schema).unwrap(),
             implicit_tool_call_config,
             description: None,
+            all_explicit_template_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Json(tool_config);
 
@@ -1550,11 +1638,15 @@ mod tests {
                     (
                         name.to_string(),
                         Arc::new(VariantInfo {
-                            inner: VariantConfig::ChatCompletion(ChatCompletionConfig {
-                                weight: Some(weight),
-                                model: "model-name".into(),
-                                ..Default::default()
-                            }),
+                            inner: VariantConfig::ChatCompletion(
+                                UninitializedChatCompletionConfig {
+                                    weight: Some(weight),
+                                    model: "model-name".into(),
+                                    ..Default::default()
+                                }
+                                .load(&SchemaData::default(), &ErrorContext::new_test())
+                                .unwrap(),
+                            ),
                             timeouts: Default::default(),
                         }),
                     )
@@ -1669,6 +1761,7 @@ mod tests {
             tool_choice: ToolChoice::None,
             parallel_tool_calls: None,
             description: Some("A chat function description".to_string()),
+            all_explicit_templates_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Chat(chat_config);
         assert_eq!(
@@ -1685,6 +1778,7 @@ mod tests {
             output_schema,
             implicit_tool_call_config,
             description: Some("A JSON function description".to_string()),
+            all_explicit_template_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Json(json_config);
         assert_eq!(
@@ -1700,6 +1794,7 @@ mod tests {
             tool_choice: ToolChoice::None,
             parallel_tool_calls: None,
             description: None,
+            all_explicit_templates_names: HashSet::new(),
         };
         let function_config = FunctionConfig::Chat(chat_config);
         assert_eq!(function_config.description(), None);
@@ -1733,6 +1828,7 @@ mod tests {
             output_schema,
             implicit_tool_call_config,
             description: None,
+            all_explicit_template_names: HashSet::new(),
         });
         let raw_request = "raw_request".to_string();
 
@@ -1750,7 +1846,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -1799,7 +1895,7 @@ mod tests {
                 assert_eq!(result.finish_reason, Some(FinishReason::Stop));
                 assert_eq!(result.model_inference_results, vec![model_response]);
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with a correct content block
@@ -1816,7 +1912,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -1852,7 +1948,7 @@ mod tests {
                 );
                 assert_eq!(result.model_inference_results, vec![model_response]);
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with an incorrect JSON content block
@@ -1869,7 +1965,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -1903,7 +1999,7 @@ mod tests {
                 assert_eq!(result.model_inference_results, vec![model_response]);
                 assert_eq!(result.finish_reason, Some(FinishReason::ToolCall));
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with a tool content block with bad output
@@ -1922,7 +2018,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -1956,7 +2052,7 @@ mod tests {
                 assert_eq!(result.model_inference_results, vec![model_response]);
                 assert_eq!(result.finish_reason, Some(FinishReason::ToolCall));
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with a tool content block with good output
@@ -1975,7 +2071,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -2014,7 +2110,7 @@ mod tests {
                 assert_eq!(result.model_inference_results, vec![model_response]);
                 assert_eq!(result.finish_reason, Some(FinishReason::ContentFilter));
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with no content blocks
@@ -2028,7 +2124,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -2061,7 +2157,7 @@ mod tests {
                 assert_eq!(result.finish_reason, model_response.finish_reason);
                 assert_eq!(result.model_inference_results, vec![model_response]);
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         let dynamic_output_schema = DynamicJSONSchema::new(serde_json::json!({
@@ -2101,7 +2197,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -2131,7 +2227,7 @@ mod tests {
                 assert_eq!(result.output.raw, Some(r#"{"answer": "42"}"#.to_string()));
                 assert_eq!(result.model_inference_results, vec![model_response]);
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with an incorrect JSON content block
@@ -2148,7 +2244,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -2181,7 +2277,7 @@ mod tests {
                 );
                 assert_eq!(result.model_inference_results, vec![model_response]);
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with a tool content block with bad output
@@ -2200,7 +2296,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -2233,7 +2329,7 @@ mod tests {
                 assert_eq!(result.output.raw, Some("tool_call_arguments".to_string()));
                 assert_eq!(result.model_inference_results, vec![model_response]);
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with a tool content block with good output
@@ -2252,7 +2348,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -2284,7 +2380,7 @@ mod tests {
                 assert_eq!(result.output.raw, Some(r#"{"answer": "42"}"#.to_string()));
                 assert_eq!(result.model_inference_results, vec![model_response]);
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
 
         // Test with an empty output schema
@@ -2297,6 +2393,7 @@ mod tests {
             output_schema,
             implicit_tool_call_config,
             description: None,
+            all_explicit_template_names: HashSet::new(),
         });
         let inference_id = Uuid::now_v7();
         let content_blocks = vec![r#"{"answer": "42"}"#.to_string().into()];
@@ -2311,7 +2408,7 @@ mod tests {
             id: Uuid::now_v7(),
             created: Instant::now().elapsed().as_secs(),
             system: None,
-            input_messages: vec![],
+            input_messages: RequestMessagesOrBatch::Message(vec![]),
             output: content_blocks.clone(),
             raw_request: raw_request.clone(),
             raw_response: "content".to_string(),
@@ -2342,7 +2439,7 @@ mod tests {
                 assert_eq!(result.model_inference_results, vec![model_response]);
                 assert_eq!(result.finish_reason, Some(FinishReason::Stop));
             }
-            _ => panic!("Expected a JSON inference result"),
+            InferenceResult::Chat(_) => panic!("Expected a JSON inference result"),
         }
     }
 

@@ -3,8 +3,10 @@ async fn test_embedded_invalid_glob() {
     let err = tensorzero::ClientBuilder::new(tensorzero::ClientBuilderMode::EmbeddedGateway {
         config_file: Some("/invalid/tensorzero-e2e/glob/**/*.toml".into()),
         clickhouse_url: None,
+        postgres_url: None,
         timeout: None,
         verify_credentials: true,
+        allow_batch_writes: true,
     })
     .build()
     .await
@@ -42,8 +44,10 @@ async fn test_embedded_duplicate_key() {
     let err = tensorzero::ClientBuilder::new(tensorzero::ClientBuilderMode::EmbeddedGateway {
         config_file: Some(glob.clone()),
         clickhouse_url: None,
+        postgres_url: None,
         timeout: None,
         verify_credentials: true,
+        allow_batch_writes: true,
     })
     .build()
     .await

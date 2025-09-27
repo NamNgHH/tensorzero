@@ -8,7 +8,7 @@ use super::{
     GCPVertexGeminiFileURI, GCPVertexGeminiSupervisedRow,
 };
 use crate::{
-    config_parser::TimeoutsConfig,
+    config::TimeoutsConfig,
     error::{Error, ErrorDetails},
     inference::types::{ContentBlock, FlattenUnknown},
     model::{
@@ -19,7 +19,7 @@ use crate::{
     providers::gcp_vertex_gemini::{
         GCPVertexGeminiContent, GCPVertexGeminiContentPart, GCPVertexGeminiRole, PROVIDER_TYPE,
     },
-    stored_inference::RenderedSample,
+    stored_inference::LazyRenderedSample,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -56,19 +56,16 @@ pub struct GCPVertexGeminiFineTuningRequest {
     pub encryption_spec: Option<EncryptionSpec>,
 }
 
-impl<'a> TryFrom<&'a RenderedSample> for GCPVertexGeminiSupervisedRow<'a> {
-    type Error = Error;
-    fn try_from(inference: &'a RenderedSample) -> Result<Self, Self::Error> {
+impl<'a> GCPVertexGeminiSupervisedRow<'a> {
+    pub async fn from_rendered_sample(inference: &'a LazyRenderedSample) -> Result<Self, Error> {
         let tools = match &inference.tool_params {
             Some(tool_params) => tool_params.tools_available.iter().map(Into::into).collect(),
             None => vec![],
         };
-        let mut contents =
-            prepare_gcp_vertex_gemini_messages(&inference.input.messages, PROVIDER_TYPE)?;
+        let mut contents = prepare_gcp_vertex_gemini_messages(&inference.messages).await?;
         let system_instruction =
             inference
-                .input
-                .system
+                .system_input
                 .as_ref()
                 .map(|system_instruction| GCPVertexGeminiContent {
                     role: GCPVertexGeminiRole::System,
@@ -92,7 +89,8 @@ impl<'a> TryFrom<&'a RenderedSample> for GCPVertexGeminiSupervisedRow<'a> {
             GCPVertexGeminiRole::Model,
             Cow::Owned(output_content_blocks),
             PROVIDER_TYPE,
-        )?;
+        )
+        .await?;
         contents.push(final_model_message);
         Ok(Self {
             contents,
@@ -249,30 +247,45 @@ impl Display for GCPVertexGeminiFineTuningJobStatus {
 #[cfg(test)]
 mod tests {
     use crate::{
-        inference::types::{ContentBlockChatOutput, ModelInput, RequestMessage, Role, Text},
+        inference::types::{
+            ContentBlockChatOutput, ModelInput, ResolvedContentBlock, ResolvedRequestMessage, Role,
+            StoredInput, StoredInputMessage, StoredInputMessageContent, Text,
+        },
         model::CredentialLocation,
         providers::gcp_vertex_gemini::GCPVertexGeminiContentPart,
+        stored_inference::{RenderedSample, StoredOutput},
     };
     use serde_json::json;
 
     use super::*;
 
-    #[test]
-    fn test_convert_to_sft_row() {
+    #[tokio::test]
+    async fn test_convert_to_sft_row() {
+        let output = Some(vec![ContentBlockChatOutput::Text(Text {
+            text: "The capital of France is Paris.".to_string(),
+        })]);
         let inference = RenderedSample {
             function_name: "test".to_string(),
             input: ModelInput {
                 system: Some("You are a helpful assistant named Dr. M.M. Patel.".to_string()),
-                messages: vec![RequestMessage {
+                messages: vec![ResolvedRequestMessage {
                     role: Role::User,
-                    content: vec![ContentBlock::Text(Text {
+                    content: vec![ResolvedContentBlock::Text(Text {
                         text: "What is the capital of France?".to_string(),
                     })],
                 }],
             },
-            output: Some(vec![ContentBlockChatOutput::Text(Text {
-                text: "The capital of France is Paris.".to_string(),
-            })]),
+            stored_input: StoredInput {
+                system: Some(json!("You are a helpful assistant named Dr. M.M. Patel.")),
+                messages: vec![StoredInputMessage {
+                    role: Role::User,
+                    content: vec![StoredInputMessageContent::Text {
+                        value: json!("What is the capital of France?"),
+                    }],
+                }],
+            },
+            output: output.clone(),
+            stored_output: output.map(StoredOutput::Chat),
             episode_id: Some(uuid::Uuid::now_v7()),
             inference_id: Some(uuid::Uuid::now_v7()),
             tool_params: None,
@@ -280,7 +293,10 @@ mod tests {
             dispreferred_outputs: vec![],
             tags: HashMap::from([("test_key".to_string(), "test_value".to_string())]),
         };
-        let row = GCPVertexGeminiSupervisedRow::try_from(&inference).unwrap();
+        let lazy_inference = inference.into_lazy_rendered_sample();
+        let row = GCPVertexGeminiSupervisedRow::from_rendered_sample(&lazy_inference)
+            .await
+            .unwrap();
 
         // Check that we have the expected number of messages (user + assistant)
         assert_eq!(row.contents.len(), 2);
